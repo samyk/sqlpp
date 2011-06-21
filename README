@@ -1,0 +1,250 @@
+sql++ 0.16 -- http://samy.pl/sql++
+by Samy Kamkar [code@samy.pl]
+
+
+sql++ is an easily configurable, feature-rich, portable
+command-line SQL tool.  It can be used in place of other
+command-line tools such as MySQL's mysql-client,
+PostgreSQL's psql, and Oracle's sqlplus. It has features
+such as multiple connections, multi-database interfacing,
+subselects for all databases, regardless of whether the
+database has native subselects or not, and much more.
+
+sql++ supports most SQL databases (as well as a few non-DBs),
+tested ones including:
+ MySQL, PostgreSQL, SQLite, Oracle, IBM DB2, Sybase, CSVs and Excel spreadsheets
+
+and untested ones:
+ Adabas, DBMaker, Fulcrum, Illustra, Informix,
+ Ingres, InterBase, JDBC, LDAP, ODBC (Access, etc.),
+ Ovrimos, Empress, PrimeBase, Solid, Unify, XBase,
+ and SearchServer
+
+Not all are fully supported (yet), but they can be added easily.
+If one of these is not working for you, please contact me
+(info at bottom) and I will get it implemented ASAP.
+
+If sql++ is lacking support for a database type that you
+don't see listed here and you would like it,
+please let me know!
+
+
+
+INSTALLATION:
+  Required modules:
+    DBI
+    Time::HiRes
+    Term::ReadKey
+    Term::ReadLine::Gnu on *NIX, Term::ReadLine::Perl on Win32 (this will be installed as 'Term::ReadLine')
+
+  To install sql++, run:
+    perl install.pl
+
+  This will check for the required modules.  It will then
+  tell you what available database drivers you have.
+
+  If you are missing any of the required modules, it will attempt
+  to install them for you if you allow it.  If you wish to install
+  the modules yourself, get them from CPAN (http://search.cpan.org)
+  and install them.  You can return to the installation later.
+
+  If you wish to use sql++ with other databases that install.pl
+  did not say you had a driver for, continue with the installation
+  and you can choose to install any from a larger list it will give you.
+
+  If the database you want to use is not in the list at all,
+  check http://search.cpan.org for the database name.  If you come
+  up with a DBD::database_name module, download it and follow the
+  instructions to install it.
+
+  If you have any problems, please email me at code@samy.pl.
+
+
+
+LEARNING SQL++:
+  To get detailed information on functions implemented in sql++,
+  type "help" and "morehelp" at the sql++ command line.
+
+
+
+MAIN FUNCTIONALITY:
+sql++ commands:
+help            (\h)    Display this help.
+morehelp        (\M)    Display more help on macros, subselects, multiple connections,
+                        importing files to fields, delimited imports, and exports.
+%macros                 Type 'morehelp' for help on this.
+?               (\?)    Synonym for `help'.
+/               (\/)    Executes last statement or last edited statement.
+!               (\!)    Execute [command] in your shell and return the output.
+chdir           (\cd)   Change the current working directory.
+conn            (\c)    Execute, on database handle number [handle], the [statement].
+                        Type 'morehelp' for help on this.
+connect         (\r)    Create an additional connection to a database.  Arguments
+                        are the same as on the command line.  Type 'connect' for usage.
+                        Type 'morehelp' for help on this.
+\d [NAME]               PostgreSQL - describe table, index, sequence, or view.
+                        (add "+" for more detail)
+\d{t|i|s|v|S} [PATTERN] PostgreSQL - list tables/indexes/sequences/views/system tables.
+                        (add "+" for more detail)
+\da [PATTERN]           PostgreSQL - list aggregate functions.
+\dd [PATTERN]           PostgreSQL - show comment for object.
+\dD [PATTERN]           PostgreSQL - list domains.
+\df [PATTERN]           PostgreSQL - list functions. (add "+" for more detail)
+\do [NAME]              PostgreSQL - list operators.
+\dp [PATTERN]           PostgreSQL - list table access privileges.
+\dT [PATTERN]           PostgreSQL - list data types. (add "+" for more detail)
+\du [PATTERN]           PostgreSQL - list users.
+disconnect      (\D)    Disconnect [db handle #].
+edit            (\e)    Edit last command, or [file], with $EDITOR.
+exit            (\q)    Exit sql++. Same as 'quit'.
+export          (\E)    Export data (append) into [file] with [delimiter]
+                        from [statement].  Type 'morehelp' for help on this.
+import          (\i)    Import data from [file] with [delimiter] into place-holders
+                        in [statement] (? = place-holder, ?? = variable # of place-holders)
+                        Type 'morehelp' for help on this.
+importfile()            Type 'morehelp' for help on this.
+\list           (\l)    PostgreSQL - list databases.
+notee           (\t)    Don't write into outfile.  Same as 'spool off'.
+oexport         (\O)    Export data (overwrite) into [file] with [delimiter]
+                        from [statement].
+quit            (\q)    Quit sql++.
+reconnect       (\R)    Reconnect to the main database or [db handle #].
+rehash          (\#)    Rebuild completion hash.
+subsel()                Type 'morehelp' for help on this.   
+tee             (\T)    Set outfile [to_outfile]. Append everything into given outfile.
+                        Same as 'spool'.
+use             (\u)    Use another database. Takes database name as argument.
+\z                      PostgreSQL - list table access permissions. (same as \dp)
+
+
+macros -- subselects -- exports -- imports -- multiple connections:
+%name = <statment with placeholders>;
+                        Sets '%name' to the statement.  To specify a place-holder, use a
+                        question mark (?).  e.g.,
+                          %name = SELECT * FROM my_tbl WHERE name = ? OR id = ?;
+
+%name(<arguments>);
+%name('data', 123);     Executes '%name' and replaces the two
+                        place-holders with 'data' and 123.  You must add the same number of
+                        values to the macro arguments list as there are place-holders.  You can
+                        see the number of place-holders and statement of a macro by <Tab>ing a
+                        few times while completing the macro name.
+
+subsel(<statement>)     Executes <statement>, loops through each row returned and executes the
+                        statement which subsel() is nested inside of with the data returned
+                        from the row.  e.g.,
+                          SELECT * FROM my_tbl WHERE id = subsel(SELECT id FROM other_tbl);
+
+importfile("filename")  Inserts the contents of "filename" into the SQL statement.  Useful for
+                        inserting data into BLOBs, LONGs, etc.  e.g.,
+                          INSERT INTO my_tbl(blobfield) VALUES(importfile("/etc/passwd"));
+
+importfile(-)		Allows you to import data from STDIN rather than a file.
+
+export/export <filename> <'delimiter'> <statement>;
+export  file.txt ',' SELECT * FROM tbl;
+oexport file.txt ',' SELECT * FROM tbl;
+                        Exports all fields (delimited by ',') and rows from tbl into file.txt.
+                        'export' appends to file.txt, 'oexport' overwrites file.txt.  All data
+                        will be encapsulated in ""s and actual double-quotes in data will be escaped.
+
+import <filename> <'delimiter'> [field#1, field#2, ...] <statement>;
+import file.txt ',' INSERT INTO tbl(a, b, c, d)             VALUES(?, ?, ?, ?);
+import file.txt ',' INSERT INTO tbl(a, b, c, d)             VALUES(??);
+import file.txt ',' 3, 2, 1, 0, INSERT INTO tbl(d, c, b, a) VALUES(?, ?, ?, ?);
+                        All do the same thing, assuming there are 4 comma-delimited fields per row
+                        in file.txt.  The third import statement reverses the order of the
+                        place-holders based off of the numbers.  The numbers represent the field
+                        value number (minus one) in the delimited text file.  e.g.,
+                          import file.txt ',' 3 SELECT ?;
+                        will select the fourth (0 = first, 1 = second, etc.) field in file.txt.
+                        A '??' is a variable-number place-holder.  You can use one '??' with as
+                        many '?'s as you wish.  e.g.,
+                          import file.txt ',' SELECT 'a', ?, 'c', ??, 'g', ?;
+                        If file.txt has a row with 'b,d,e,f,h', the output of the select will be
+                        a, b, c, d, e, f, g, h.
+
+import - '' UPDATE table SET field = "foo" WHERE other = ?;
+other_value
+some_other_value
+another_value
+<CTRL+D>
+import - '' SELECT * FROM table WHERE id = ?;
+12
+18
+99
+<CTRL+D>
+			You can use import to read from STDIN (-).  Reading from STDIN makes it
+			easy to do multiple queries reading in different values, quickly.
+
+connect [usage options] <database>
+connect -t oracle -u username -p oradb
+                        Creates a new database handle/connection and returns the handle number.
+                        You can use the 'conn' command to execute a statement on that handle.
+
+conn [db handle #] <statement>
+conn 1 SELECT * from ora_table;
+                        Executes a statement on a database handle.  The database handle number
+                        created at startup is 0.  You can interface multiple connections with
+                        each other using the subsel() function and conn.  e.g.,
+                          SELECT * FROM my_tbl WHERE id = subsel(conn 1 SELECT id FROM ora_tbl);
+                        same as
+                          conn 0 SELECT * FROM my_tbl WHERE id = subsel(conn 1 SELECT id FROM ora_tbl);
+
+disconnect <db handle #>
+                        Disconnects from specified database handle.
+
+reconnect [db handle #]
+                        Reconnects to database handle, if specified.  Otherwise, reconnects from
+                        default database.
+
+
+
+OTHER FEATURES:
+Some other features of sql++:
+1.  Support for a lot of different SQL databases, as
+    stated above.
+
+2.  Shell-type enhancements, such as a history buffer,
+    moving through a query/line with CTRL keys, etc.
+    Example, CTRL+A to move to the beginning of a line,
+    CTRL+E to move to the end, arrow keys to control
+    placement, etc.
+
+3.  Easily configurable via sql++ or the .sql++config file.
+    Examples of configurable options are changing the way
+    the output tables of selects/descs/etc look like.
+    By default they are similar to the output that mysql
+    has, but if you prefer something more compressed with
+    less seperators, you could go for something like how
+    sqlplus displays tables.  To change it, you would run,
+    in sql++ OR change these 5 lines in your .sql++config:
+     $LINE1 = [' ', ' ', ' ', ' '];
+     $DATA1 = [' ', ' ', ' '];
+     $LINE2 = [' ', ' ', '-', ' '];
+     $DATA2 = [' ', ' ', ' '];
+     $LINE3 = [' ', ' ', ' ', ' '];
+    If you wish to change back to mysql-type tables:
+     $LINE1 = ['+', '+', '-', '+'];
+     $DATA1 = ['|', '|', '|'];
+     $LINE2 = ['+', '+', '-', '+'];
+     $DATA2 = ['|', '|', '|'];
+     $LINE3 = ['+', '+', '-', '+'];
+    Configuration is saved on exit of sql++.  Changes are in
+    effect immidiately, or when you run sql++, if you happened
+    to change the config file directly.
+
+4.  Pausing queries using CTRL+C.
+
+5.  Other stuff I didn't mention because I forgot.
+
+
+
+BUGS:
+Any bugs?  Contact me!
+
+
+CONTACT:
+Questions?  Comments?  Want feature additions?
+Feel free to contact me, Samy Kamkar, at code@samy.pl
+sql++ is available from http://samy.pl/sql++

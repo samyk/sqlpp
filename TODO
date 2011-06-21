@@ -1,0 +1,47 @@
+Display binary columns as hexadecimal encoded.
+
+Add a command to view all connections and connection info.
+
+Add a control sequence and command to switch between database
+ connections.
+
+Make the prompts variable (e.g., '$user.$dbname> ').
+
+Make the 'Enter password:' line print to terminal so you can
+ pipe data to sql++.
+
+Create a Win32 stand-alone executable with support for common
+ database types.
+
+Add using configuration documentation to the `morehelp` function.
+
+POSSIBLY add a calculator (base calculator as well?)
+
+POSSIBLY add optional color support.
+
+Add '??' (variable size place-holders) functionality to macros.
+
+Add a 'Rows matched/changed/warnings' on MySQL UPDATEs.
+
+Possibly some type of userland namespace.  e.g.,
+  @rows = SELECT field1, field2 FROM table_name;
+  INSERT INTO table2(fielda, fieldb) VALUES(@rows);
+Another possibility I was discussing with someone is perl code
+ with easily embedded sql.  E.g.,
+  eval(
+    foreach (@arr = sql(SELECT id, name FROM table))
+    {
+      sql(DELETE FROM table WHERE id = $arr[0]) if $arr[1] =~ /bad/i;
+    }
+  );
+
+Add support for running .sql files.  e.g.,
+  @file
+ or
+  sql++ -s file database_name
+ or
+  source file
+ or
+  \. file
+
+Test other databases...

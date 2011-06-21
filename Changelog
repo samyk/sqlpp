@@ -1,0 +1,280 @@
+06/21/11 .. 0.16:
+	Added to github - http://github/samyk/sql++
+	Various bug fixes
+	Support running without a tty
+	Added -O to allow config options from command line
+	Added -L for prettier borders
+	Added -W for prettier data when content is too long for the line
+
+11/10/06 .. 0.14-15:
+	Fixed a bug preventing some distros of
+	 Linux from starting sql++ up properly.
+
+11/07/06 .. 0.13:
+	Added -S option for mysql connections
+	 to have "safe" connections. See mysql's
+	 --safe-updates.
+	Introducing some Microsoft SQL support
+	 using the Sybase driver.
+	Added better handling of different
+	 database drivers when errors arise.
+	Fixed a bug where with some database
+	 types you couldn't specify a port.
+	Fixed a double-line parsing inefficiency.
+	Fixed an Oracle bug which showed all
+	 column names for all Oracle tables with
+	 the same table name to display when
+	 using field name auto-completion for a
+	 specific table.
+
+
+10/28/03 .. 0.12:
+	No more Time::HiRes or C/XS required for
+	 the high resolution timer!  I've
+	 created a pure perl, high resolution
+	 timer that reads through C include
+	 files the first time you run sql++ to
+	 grab the value of SYS_gettimeofday and
+	 uses perl's syscall() to execute the
+	 gettimeofday() function.
+	Added auto-detection for the database to
+	 use by default when not specifying -t.
+	 Each time you make a successful
+	 connection to a database, sql++ records
+	 what type of database it was and the
+	 database type with the most connections
+	 remains the default database type used
+	 when -t is not specified.
+	Added STDIN reading for the `import`
+	 and importfile() functions.  Example:
+	  IMPORT - ''	UPDATE	table
+			SET	field1 = "foo"
+			WHERE	value = ?;
+	  SOME_VAL
+	  ANOTHER_VAL
+	  SOME_OTHER_VAL
+	  <CTRL+D>
+	  Query OK, 3 rows affected (0.003 secs)
+	Fixed a bug in the `import` function
+	 which didn't display all rows.
+	Made the statement parsers much more
+	 efficient when handling quoted strings.
+	Added functionality to allow DESC/SHOWs
+	 on database handles other than the
+	 default.
+
+
+10/22/03 .. 0.11:
+	Added support for not escaping single
+	 quotes when preceded by a backslash.
+	 This allows Oracle-specific statements
+	 such as:
+	  SELECT	value
+	  FROM		table
+	  WHERE		value LIKE '%\_%'
+	  ESCAPE	'\';
+	 This can be turned off by setting:
+	  $ESCSINGQUOTE = 1;
+	Configuration file (.sql++config)
+	 format has changed a bit, as well as the
+	 additional configuration variable has
+	 been added.
+	Made table name and field name auto-
+	 completion much more efficient and
+	 making sql++ startup time much faster.
+	Made table name and field name auto-
+	 completion case-insensitive.
+	Added a \cd (chdir) function.
+	Increased the efficiency of one of the
+	 statement parsing functions.
+	Fixed an Oracle bug that displayed columns
+	 from multiple tables with the same names
+	 in different schemas when using `desc`.
+	Fixed a bug that caused certain functions
+	 and macros to stop reading data at a '0',
+	 thanks to Kas Robson for finding this bug.
+	Fixed macro/parsing bugs that caused
+	 whitespace or empty strings to not be
+	 interpreted correctly.
+
+
+07/04/03 .. 0.10:
+	Added full PostgreSQL support, including
+	 functions: \l (\list), \d, \da, \dd, \dD, \df,
+	 \di, \do, \dp (\z), \ds, \dS, \dt, \dT, \du,
+	 and \dv.
+	Added table field name auto-completion,
+	 e.g., tablename.fie<TAB>.
+	Added filename completion when using the
+	 export/oexport/import/tee/spool/importfile
+	 functions.
+	Changed \d (disconnect) to \D.
+	Added some minor parser efficiencies.
+	Bug fix for some database types where a
+	 'show tables' would show data from the
+	 previous buffer as well as the tables.
+	Bug fix in parsing out slashes from escaped
+	 single quotes.
+	Bug fix when placing a '\command' on a new
+	 line within quotes would get executed.
+	Bug fix in returning number of rows for
+	 certain operations in certain databases.
+	Bug fix when using `desc` on Sybase tables.
+	Bug fix when using `desc` on DB2 tables.
+	Tables used in auto-completion are updated
+	 when changing databases.
+
+
+06/09/03 .. 0.09:
+	Major bug fix that was causing many database types to
+	 not be usable unless -A option was given.
+	Added Sybase support.
+	Added IBM DB2 support, thanks to Jeff Lawson
+	 <jlawson AT bovine.net>.
+	Added Windows support.  I'll be working on getting
+	 some binaries out with support for the popular
+	 database types.
+	Reworked code so additional database functions can
+	 easily be implemented.
+	Fixed bug where `oexport` was not overwriting the
+	 specified file.
+	Fixed bug when accessing Excel spreadsheets without
+	 the -A option.
+	Linked `describe` to `desc`.
+
+
+06/05/03 .. 0.08:
+	Bug fix when using Oracle while executing `desc` and
+	 specifying the database name.
+	Minor bug fixes when reading macros from config file.
+
+
+02/09/03 .. 0.07:
+	Added 'reconnect'/'\R' function to reconnect to a database
+	 handle
+	Added comment support (e.g., "--<comment>" or "#<comment>")
+	 Comments are ignored, so
+	  SELECT *
+	  # blah
+	  FROM tbl_name;
+	 is actually
+	  SELECT *
+	  FROM tbl_name;
+	Fixed minor bug where some sql++ specific commands wouldn't
+	 execute if a ';' was appended to the end
+	Fixed a bug where 'rehash' wasn't removing dropped tables
+	 but was adding new tables and also wasn't checking all
+	 database handlers
+	Fixed a bug when using the 'import' function and specifying
+	 field names, the import may have not worked correctly
+	Fixed a bug where, by default, it seemed as if the -f option
+	 was in place, even if it wasn't, with certain queries
+	Fixed a bug where when importing a delimited file and not
+	 using quotes around strings, whitespace in the middle of
+	 the strings were not kept as part of the string
+	Set AutoCommit off for Oracle connections so when commands
+	 are executed, they are not commited until you execute
+	 'commit;', or they get thrown away if you 'rollback;'
+	Fixed a query pausing bug
+
+
+01/20/03 .. 0.06:
+	Got a real site up at http://samy.pl/sql++
+	Created a new install script
+	Added an importfile("file") function for importing contents
+	 of files into BLOBs/LONGs/etc
+	Added 'help', '\h', '\?', and '?' function for basic help
+	Added 'morehelp' and '\M' function for more help on sql++'s
+	 advanced features
+	Added auto-completion of table names, even after creation,
+	 renaming, dropping, etc and added -A argument to prevent
+	 this feature from working
+	Added 'rehash' and '\#' function to rebuild completion hash
+	 if sql++ didn't see any changes to any tables (e.g., a table
+	 is renamed/etc by another client)
+	Auto-completion of config variables only done when '$' is
+	 the preceding character
+	Auto-completion of macros only done when '%' is the preceding
+	 character
+	Configuration variables are now accessed as '$NAME' instead of
+	 'NAME'.  They remain without the '$' in the .sql++config so
+	 no need to modify your old configuration file
+	Spooling automatically appends now instead of overwriting
+	Fixed a bug where using auto-completion would create superfluous
+	 data in the history buffer
+	Fixed a small Oracle issue where malformed queries would return
+	 an incorrect error
+	Added 'disconnect' function to disconnect a database handle
+	Much smarter auto-completion by using the function parser
+	Added -T option to spool using command line
+	Added 'conn' and 'connect' function usage syntax and error
+	 handling
+	Added 'export', 'oexport' and 'import' function usage syntax and
+	 error handling
+	Aliased '/' to '\/'
+	Aliased '!' to '\!'
+	Aliased 'conn' to '\c'
+	Aliased 'connect' to '\r'
+	Aliased 'export' to '\E'
+	Aliased 'oexport' to '\O'
+	Aliased 'import' to '\i'
+	Aliased 'quit/exit' commands to '\q'
+	Aliased 'use' to '\u'
+	Aliased 'edit' to '\e'
+	Aliased 'spool' to 'tee' and '\T'
+	Aliased 'spool off' to 'notee' and '\t'
+
+
+01/17/03 .. 0.05:
+	Minor bug fixes
+	Faster pseudo-subselect
+	Code cleanup for overall increase in speed and efficiency
+	Rewrote the SQL statement parsers, reusing faster code
+	Better query-pausing support with Ctrl+C
+
+
+01/14/03 .. 0.04:
+	Fixed a bunch of bugs
+	Added allowance of '??' in imports to specify variable number of
+	 place-holders, based on the number of columns in the file being
+	 imported
+	Added 'oexport' function, same as export except overwrites file
+	 rather than appending
+	Added pseudo-subselects!  You can do subselects on any database,
+	 regardless of whether or not the database supports subselects
+	 natively
+	Added -f (force) option to force continuation of queries when
+         one fails
+	Added 'export' and 'import' functions to export and import data
+	 from "your choice"-delimited files into tables and vice versa
+	Added support for Microsoft Excel spreadsheets
+	Added some mysql and Oracle specific stuff
+	Better macro description when tabbing after macro names
+	Added an 'EXAMPLES' file with sql++ examples
+	'edit'/'spool' commands more similar to sqlplus
+	Added '!' command to execute commands at shell, like sqlplus
+	Added much better configuration saving/support
+	Added configuration variables for the table looks
+	Improved the timer
+	OO'ified everything
+	Checking for Term::ReadLine::Gnu on start
+
+
+01/10/03 .. 0.03:
+	Added spooling (logging to disk) with the 'spool' command
+	Added semi-completion for macros as well as macro definition using
+	 the tab auto-completion
+	Added pausing a SELECT/DESC query with CTRL+C
+	Added full configuration reading and writing (macros and all config variables)
+	Added configuration value modification with auto-completion
+
+
+01/09/03 .. 0.02:
+	Added support for 'edit' and '/' commands
+	-t option (db type) isn't case sensitive
+	Better argument handling
+	Buffered output so big queries are possible
+
+
+01/07/03 .. 0.01:
+	sql++ released

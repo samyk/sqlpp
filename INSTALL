@@ -1,0 +1,31 @@
+sql++ Installation
+
+Required modules:
+  DBI
+  Time::HiRes
+  Term::ReadKey
+  Term::ReadLine::Gnu on *NIX, Term::ReadLine::Perl on Win32 (this will be installed as 'Term::ReadLine')
+ 
+To install sql++, run:
+  perl install.pl
+
+This will check for the required modules.  It will then
+tell you what available database drivers you have.
+
+If you are missing any of the required modules, it will attempt
+to install them for you if you allow it.  If you wish to install
+the modules yourself or install.pl has problems installing them
+and requires manual installation, get them from CPAN 
+(http://search.cpan.org) and install them.  You can return to
+the installation later.
+                      
+If you wish to use sql++ with other databases that install.pl
+did not say you had a driver for, continue with the installation
+and you can choose to install any from a larger list it will give you. 
+
+If the database you want to use is not in the list at all,
+check http://search.cpan.org for the database name.  If you come
+up with a DBD::database_name module, download it and follow the
+instructions to install it.
+                      
+If you have any issues, please email me at code@samy.pl

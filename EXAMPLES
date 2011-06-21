@@ -1,0 +1,35 @@
+Here are some examples of the different features of sql++.
+
+# quickly doing a select on many different values for a WHERE clause
+IMPORT - '' SELECT domain, nameserver FROM domains_table WHERE domain = ?;
+abc.com
+bcd.com
+cde.com
+samy.pl
+CTRL+D
+
+
+# copying a table into another table using sql++'s subselect
+INSERT INTO table1 VALUES(subsel(SELECT * FROM table2));
+
+
+# copying a table into another table in a completely different
+# database, as well as type of database using sql++'s subselect
+# plus multiple connections
+connect -t oracle -u user -X pass oradb
+> Created connection handle '1' to oradb
+connect -t mysql -u user -X pass mydb
+> Created connection handle '2' to mydb
+conn 2 INSERT INTO my_tbl VALUES(subsel(conn 1 SELECT * FROM ora_tbl));
+
+
+# taking a long row, making a simple modification, and inserting it quickly
+# using the overwrite export function, edit function, and import function
+oexport x , SELECT * FROM user WHERE user='root';
+edit x;
+> your editor opens and you make a quick change to
+> the comma seperated data and then save and exit
+import x , INSERT INTO user VALUES(??);
+
+
+Read the README or run `morehelp` while in sql++ for more examples.

@@ -1,0 +1,5223 @@
+#!/usr/bin/perl
+#
+# sql++
+#
+# by Samy Kamkar [code@samy.pl]
+# http://samy.pl
+#
+########################################################
+
+# load some modules
+use strict;
+use DBI;
+use Getopt::Std;
+use Term::ReadKey;
+use Term::ReadLine;
+use Term::ANSIColor;
+&checkModules();    # make sure the user has correct modules
+
+# set some stuff up
+my $LCL = sqlpp->new(VERSION => '0.16');
+$0 = 'sql++-' . $LCL->{VERSION};
+
+# overwrite anything above from config file
+$LCL->setupConfig();
+
+# get arguments from command line
+$LCL->getArgs(0, @ARGV);
+
+if (-t STDIN)
+{
+
+	# set up the term
+	$LCL->setupTerm();
+}
+else
+{
+	$LCL->{TERM} = $LCL;
+}
+$LCL->getScreenSize();
+
+# set up the database
+$LCL->setupDB(0);
+
+if (-t STDIN)
+{
+
+	# history stuff
+	$LCL->setupHistory();
+
+	# give the user a startup message
+	$LCL->startupMsg(0);
+}
+
+# start the loop, getting user input
+$LCL->mainLoop();
+
+# quit if mainLoop ever ends
+$LCL->quit();
+
+exit;
+
+########################
+#
+#
+#                            _/
+#                           _/
+#      _/_/_/   _/    _/   _/_/_/       _/_/_/
+#   _/_/       _/    _/   _/    _/   _/_/
+#      _/_/   _/    _/   _/    _/       _/_/
+#  _/_/_/      _/_/_/   _/_/_/     _/_/_/
+#
+#
+###
+# check to make sure we have the right modules
+sub checkModules
+{
+
+	# if on windows, check for Term::ReadLine::Perl
+	if ($^O =~ /Win32/i)
+	{
+		die "sql++ (on Win32) requires Term::ReadLine::Perl"
+		  unless Term::ReadLine->ReadLine eq 'Term::ReadLine::Perl';
+	}
+
+	# we actually need Term::ReadLine::Gnu
+	else
+	{
+		die "sql++ requires Term::ReadLine::Gnu"
+		  unless Term::ReadLine->ReadLine eq 'Term::ReadLine::Gnu';
+	}
+
+	return 1;
+}
+
+########################################################
+#
+# main sqlpp package
+#
+###
+package sqlpp;
+
+sub readline
+{
+	return <STDIN> || exit;
+}
+sub forced_update_display { }
+sub ding                  { }
+sub delete_text           { }
+sub stifle_history        { }
+sub MinLine               { }
+sub ReadHistory           { }
+sub redisplay             { }
+sub insert_text           { }
+sub addhistory            { }
+sub completion_matches    { }
+sub modifying             { }
+sub ornaments             { }
+sub Attribs               { }
+sub WriteHistory          { }
+sub display_match_list    { }
+
+sub new
+{
+	my ($class, %args) = @_;
+	my $self = {
+		DBNUM   => 0,
+		CFGFILE => $^O =~ /Win32/i
+		? ($ENV{HOME} || $ENV{HOMEDRIVE} . $ENV{HOMEPATH}) . "\sql++config.ini"
+		: ($ENV{HOME} || ((getpwuid($<))[7])) . '/.sql++config',
+		CFG => {
+			TMPDIR    => '/tmp/',
+			EDITOR    => $^O =~ /Win32/i ? 'notepad' : 'vi',
+			PRINTROWS => 100,
+			HISTFILE => $^O =~ /Win32/i
+			? ($ENV{HOME} || $ENV{HOMEDRIVE} . $ENV{HOMEPATH})
+			  . "\sql++history.ini"
+			: ($ENV{HOME} || ((getpwuid($<))[7])) . '/.sql++history',
+			HISTSIZE     => 512,
+			SINGLINEHIST => 0,
+			PS1          => 'sql++> ',
+
+			#	  PS1		=> '$user.$dbname> ',
+			PS2 => '    -> ',
+			PS3 => '    "> ',
+			PS4 => "    '> ",
+			ESCSINGQUOTE =>
+			  0,    # should a backslash before a single quote escape the quote?
+			DBATTR => {
+				RaiseError => 0,
+				PrintError => 0,
+
+				#	    AutoCommit	=> 0,
+			},
+
+			LINE1 => [ '+', '+', '-', '+' ],    # +------+------+
+			DATA1 => [ '|', '|', '|' ],         # | hdr  | hdr  |
+			LINE2 => [ '+', '+', '-', '+' ],    # +------+------+
+			DATA2 => [ '|', '|', '|' ],         # | data | data |
+			LINE3 => [ '+', '+', '-', '+' ],    # +------+------+
+
+			#	  LINE1		=> ['1', '2', '-', '3'],	# 1------3------2
+			#	  DATA1		=> ['4', '5', '|'     ],	# 4 hdr  | hdr  5
+			#	  LINE2		=> ['6', '7', '-', '8'],	# 6------8------7
+			#	  DATA2		=> ['9', '0', '|'     ],	# 9 data | data 0
+			#	  LINE3		=> ['A', 'B', '-', 'C'],	# A------C------B
+
+			#	  LINE1		=> [' ', ' ', ' ', ' '],	#
+			#	  DATA1		=> [' ', ' ', ' '     ],	#   hdr    hdr
+			#	  LINE2		=> [' ', ' ', '-', ' '],	#  ------ ------
+			#	  DATA2		=> [' ', ' ', ' '     ],	#   data   data
+			#	  LINE3		=> [' ', ' ', ' ', ' '],	#
+
+			MACROS => {},
+			OUTPUT => {
+				FLATTEN_LINE => 1,
+				NO_WRAP      => 0,
+			},
+		},
+		%args,
+	};
+
+	return bless $self, ref($class) || $class;
+}
+
+###
+# main loop which receives commands and executes them
+sub mainLoop
+{
+	my $LCL = shift;
+	$LCL->{T} = sqlpp::ASCIITable->new(
+		flatten_line => $LCL->{CFG}->{OUTPUT}->{FLATTEN_LINE},
+		no_wrap      => $LCL->{CFG}->{OUTPUT}->{NO_WRAP},
+	);
+
+	while (1)
+	{
+		foreach my $command ($LCL->parser())
+		{
+
+			# start the timer
+			$LCL->timer(1);
+			$command =~ s/^\s*//;
+			$command =~ s/\s*;?\s*$//;
+
+			# sql++ "/"/"\/" command
+			if ($command =~ /^\\?\/(\s|$)/)
+			{
+				foreach my $command2 ($LCL->parser($LCL->{LASTCMD}))
+				{
+
+					# start the timer
+					$LCL->timer(1);
+
+					my $returnVal = $LCL->statementParser($command2);
+					if ($returnVal == 1)
+					{
+						$LCL->{PARSE}->{SUBSEL}
+						  ? $LCL->subselQuery()
+						  : $LCL->executeQuery();
+					}
+					else
+					{
+						last unless $LCL->error($returnVal);
+					}
+				}
+			}
+
+			# sql++ "rehash"/"\#" command
+			elsif ($command =~ /^rehash(?:\s|$)|^\\#(?:\s|$)/i)
+			{
+				%{ $LCL->{AUTOCOMPLETE} } = ();
+
+				foreach my $dbh (0 .. $#{ $LCL->{DBH} })
+				{
+					map {
+						$LCL->{AUTOCOMPLETE}->{$_} =
+						  [ $LCL->getFields($dbh, $_) ]
+					} $LCL->getTables($dbh);
+				}
+			}
+
+			# sql++ "edit"/"\e" command
+			elsif ($command =~ /^(?:(?-i)\\e(?i)|ed(?:it?)?)(?:\s+(\S+))?\s*$/i)
+			{
+				$LCL->{TMPLASTCMD} =
+				  $LCL->editTmp($1 ? ($1, 1) : $LCL->writeTmp($LCL->{LASTCMD}));
+			}
+
+			# sql++ "quit"/"exit"/"\q" command
+			elsif ($command =~ /^(?:(?-i)\\q(?i)|quit|exit)\s*$/i)
+			{
+				$LCL->quit("Peace\n");
+			}
+
+			# sql++ "help"/"\h"/"?"/"\?" command
+			elsif ($command =~ /^(?:(?-i)\\h(?i)|\\?\?|help)(?:\s|$)/i)
+			{
+				$LCL->help();
+			}
+
+			# sql++ "morehelp"/"\M" command
+			elsif ($command =~ /^(?:(?-i)\\M(?i)|morehelp)(?:\s|$)/i)
+			{
+				$LCL->morehelp();
+			}
+
+			# sql++ "spool"/"tee"/"notee"/"\t"/"\T" commands
+			elsif (
+				my ($file) = (
+					$command =~
+					  /^(?:\\t|(?:no)?tee|spo(?:ol?)?)(?:\s+(\S+))?\s*$/i
+				)
+			  )
+			{
+				if (
+					defined($file)
+					&& (   $file =~ /^off$/i
+						|| $command =~ /^\\t/
+						|| $command =~ /^notee/i)
+				  )
+				{
+					$LCL->{SPOOL}
+					  ? $LCL->spoolOff()
+					  : $LCL->prnt("not spooling currently\n");
+				}
+
+				elsif (defined($file) && length($file))
+				{
+					$file .= ".lst" unless $file =~ tr/.//;
+					$LCL->{SPOOLFILE} = $file;
+					$LCL->spoolOn();
+				}
+
+				else
+				{
+					$LCL->prnt(
+						(
+							$LCL->{SPOOL}
+							? "currently spooling to $LCL->{SPOOLFILE}\n"
+							: "not spooling currently\n"
+						)
+					);
+				}
+			}
+
+			# sql++ "!"/"\!" command to execute a program through the shell
+			elsif ($command =~ /^\\?\!(.*)$/)
+			{
+				system($1);
+			}
+
+			# sql++ "export"/"\E"/"oexport"/"\O" command
+			elsif ($command =~
+				/^(?:(?-i)\\O|\\E(?i)|o?export)(?:\s+("[^"]+"|'[^']+'|\S+)\s+("[^"]+"|'[^']+'|\S+)\s+(.*))?\s*$/i
+			  )
+			{
+				my ($filename, $delim, $stmt) = ($1, $2, $3);
+				unless (length $filename && length $delim && $stmt)
+				{
+					$LCL->error(
+						"Usage: EXPORT/OEXPORT <filename> <'delimiter'> <statement>"
+					) ? next : last;
+				}
+
+				$delim    =~ s/^"(.*)"$/$1/;
+				$delim    =~ s/^'(.*)'$/$1/;
+				$filename =~ s/^"(.*)"$/$1/;
+				$filename =~ s/^'(.*)'$/$1/;
+				$LCL->{EXPORTFILE} = $filename;
+
+				my $returnVal = $LCL->statementParser($stmt);
+				if ($returnVal == 1)
+				{
+					$LCL->export($delim, $command =~ /^o|^(?-i)\\O(?i)/i);
+				}
+				else
+				{
+					last unless $LCL->error($returnVal);
+				}
+			}
+
+			# sql++ "import"/"\i" command
+			elsif ($command =~
+				/^(?:(?-i)\\i(?i)|import)(?:\s+("[^"]+"|'[^']+'|\S+)\s+("[^"]+"|'[^']+'|\S+)\s+((?:\d+\s*,)*\s*)(.*))?\s*$/i
+			  )
+			{
+				my ($filename, $delim, $fields, $stmt) = ($1, $2, $3, $4);
+				unless (length $filename && length $delim && $stmt)
+				{
+					$LCL->error(
+						"Usage: IMPORT <filename> <'delimiter'> [field#1, field#2, ...] <statement>"
+					) ? next : last;
+				}
+
+				$fields   =~ s/\s//g;
+				$fields   =~ s/,$//;
+				$delim    =~ s/^"(.*)"$/$1/ || $delim =~ s/^'(.*)'$/$1/;
+				$filename =~ s/^"(.*)"$/$1/ || $filename =~ s/^'(.*)'$/$1/;
+				$LCL->{IMPORTFILE} = $filename;
+
+				my $returnVal = $LCL->statementParser($stmt);
+				if ($returnVal == 1)
+				{
+					$LCL->import($delim, split(/,/, $fields));
+				}
+				else
+				{
+					last unless $LCL->error($returnVal);
+				}
+			}
+
+			# sql++ configuration variable
+			elsif ($command !~ /\s/
+				&& $command =~ /^\$([A-Z0-9]+)$/
+				&& defined($LCL->{CFG}->{$1}))
+			{
+				$command = $1;
+				if (ref($LCL->{CFG}->{$command}) eq "ARRAY")
+				{
+					$LCL->prnt(
+						"$command=[" . join(
+							", ",
+							map {
+								s/(^|[^\\])"/$1\\"/g;
+								"\"$_\""
+							  } @{ $LCL->{CFG}->{$command} }
+						  )
+						  . "];\n"
+					);
+				}
+
+				elsif (ref($LCL->{CFG}->{$command}) eq "HASH")
+				{
+					foreach (keys %{ $LCL->{CFG}->{$command} })
+					{
+						my $tmp = $LCL->{CFG}->{$command}->{$_};
+						$tmp =~ s/(^|[^\\])"/$1\\\"/g;
+						$LCL->prnt("$command\{$_}=\"$tmp\";\n");
+					}
+				}
+
+				else
+				{
+					my $tmp = $LCL->{CFG}->{$command};
+					$tmp =~ s/(^|[^\\])"/$1\\"/g;
+					$LCL->prnt("$command=\"$tmp\";\n");
+				}
+
+			}
+
+			# sql++ "disconnect"/"\D" command
+			elsif ($command =~
+				/^(?:dis(?:conn?(?:ect)?)?|(?-i)\\D(?i))(?:\s+(\d+))?$/i)
+			{
+				my $dbNum = $1;
+
+				unless (length $dbNum)
+				{
+					$LCL->error("Usage: DISCONNECT <db handle #>")
+					  ? next
+					  : last;
+				}
+				if ($LCL->{DBH}->[$dbNum])
+				{
+					$LCL->{DBH}->[$dbNum]->disconnect();
+					$LCL->{DB}->[$dbNum] = $LCL->{DBH}->[$dbNum] = undef;
+				}
+				else
+				{
+					last unless $LCL->error("no such database handle: $dbNum");
+				}
+			}
+
+			# sql++ "chdir"/"\cd" command
+			elsif ($command =~ /^(?:\\(?-i)cd(?i)|chdir)(?:\s+(\S.*))?/i)
+			{
+				unless (chdir($1))
+				{
+					last
+					  unless $LCL->error(
+						"could not change directory to '$1': $!");
+				}
+			}
+
+			# PostgreSQL "\da" (describeAggregates) command
+			elsif ($command =~ /^\\da(\+)?(?:\s+(\S+))?/)
+			{
+				my ($verbose, $pattern) = ($1, $2);
+
+				if ($LCL->{DB}->[ $LCL->{PARSE}->{DBNUMBER} ]->{t} =~ /^Pg/)
+				{
+					last unless $LCL->pg_describeAggregates($pattern, $verbose);
+				}
+				else
+				{
+					last
+					  unless $LCL->error(
+						"database handle $LCL->{PARSE}->{DBNUMBER} is not a PostgreSQL db handle"
+					  );
+				}
+			}
+
+			# PostgreSQL "\d" (describeTableDetails) command
+			elsif ($command =~ /^\\d(\+)?\s+(\S+)/)
+			{
+				my ($verbose, $pattern) = ($1, $2);
+
+				if ($LCL->{DB}->[ $LCL->{PARSE}->{DBNUMBER} ]->{t} =~ /^Pg/)
+				{
+					last
+					  unless $LCL->pg_describeTableDetails($pattern, $verbose);
+				}
+				else
+				{
+					last
+					  unless $LCL->error(
+						"database handle $LCL->{PARSE}->{DBNUMBER} is not a PostgreSQL db handle"
+					  );
+				}
+			}
+
+			# PostgreSQL "\dD" (listDomains) command
+			elsif ($command =~ /^\\dD(\+)?(?:\s+(\S+))?/)
+			{
+				my ($verbose, $pattern) = ($1, $2);
+
+				if ($LCL->{DB}->[ $LCL->{PARSE}->{DBNUMBER} ]->{t} =~ /^Pg/)
+				{
+					last unless $LCL->pg_listDomains($pattern, $verbose);
+				}
+				else
+				{
+					last
+					  unless $LCL->error(
+						"database handle $LCL->{PARSE}->{DBNUMBER} is not a PostgreSQL db handle"
+					  );
+				}
+			}
+
+			# PostgreSQL "\dd" (objectDescription) command
+			elsif ($command =~ /^\\dd(\+)?(?:\s+(\S+))?/)
+			{
+				my ($verbose, $pattern) = ($1, $2);
+
+				if ($LCL->{DB}->[ $LCL->{PARSE}->{DBNUMBER} ]->{t} =~ /^Pg/)
+				{
+					last unless $LCL->pg_objectDescription($pattern, $verbose);
+				}
+				else
+				{
+					last
+					  unless $LCL->error(
+						"database handle $LCL->{PARSE}->{DBNUMBER} is not a PostgreSQL db handle"
+					  );
+				}
+			}
+
+			# PostgreSQL "\d[tisSv]" (listTables) command
+			elsif ($command =~ /^\\d([tisSv]+)(\+)?(?:\s+(\S+))?/
+				|| $command =~ /^\\d()(\+)?\s*$/)
+			{
+				my ($tabtypes, $verbose, $pattern) = ($1, $2);
+
+				if ($LCL->{DB}->[ $LCL->{PARSE}->{DBNUMBER} ]->{t} =~ /^Pg/)
+				{
+					last
+					  unless $LCL->pg_listTables($tabtypes, $pattern, $verbose);
+				}
+				else
+				{
+					last
+					  unless $LCL->error(
+						"database handle $LCL->{PARSE}->{DBNUMBER} is not a PostgreSQL db handle"
+					  );
+				}
+			}
+
+			# PostgreSQL "\du" (describeUsers) command
+			elsif ($command =~ /^\\du(\+)?(?:\s+(\S+))?/)
+			{
+				my ($verbose, $pattern) = ($1, $2);
+
+				if ($LCL->{DB}->[ $LCL->{PARSE}->{DBNUMBER} ]->{t} =~ /^Pg/)
+				{
+					last unless $LCL->pg_describeUsers($pattern, $verbose);
+				}
+				else
+				{
+					last
+					  unless $LCL->error(
+						"database handle $LCL->{PARSE}->{DBNUMBER} is not a PostgreSQL db handle"
+					  );
+				}
+			}
+
+			# PostgreSQL "\dp"/"\z" (permissionsList) command
+			elsif ($command =~ /^\\(?:dp|z)(\+)?(?:\s+(\S+))?/)
+			{
+				my ($verbose, $pattern) = ($1, $2);
+
+				if ($LCL->{DB}->[ $LCL->{PARSE}->{DBNUMBER} ]->{t} =~ /^Pg/)
+				{
+					last unless $LCL->pg_permissionsList($pattern, $verbose);
+				}
+				else
+				{
+					last
+					  unless $LCL->error(
+						"database handle $LCL->{PARSE}->{DBNUMBER} is not a PostgreSQL db handle"
+					  );
+				}
+			}
+
+			# PostgreSQL "\do" (describeOperators) command
+			elsif ($command =~ /^\\do(\+)?(?:\s+(\S+))?/)
+			{
+				my ($verbose, $pattern) = ($1, $2);
+
+				if ($LCL->{DB}->[ $LCL->{PARSE}->{DBNUMBER} ]->{t} =~ /^Pg/)
+				{
+					last unless $LCL->pg_describeOperators($pattern, $verbose);
+				}
+				else
+				{
+					last
+					  unless $LCL->error(
+						"database handle $LCL->{PARSE}->{DBNUMBER} is not a PostgreSQL db handle"
+					  );
+				}
+			}
+
+			# PostgreSQL "\l"/"\list" (listAllDbs) command
+			elsif ($command =~ /^\\l(?:ist)?(\+)?/)
+			{
+				my ($verbose) = ($1);
+
+				if ($LCL->{DB}->[ $LCL->{PARSE}->{DBNUMBER} ]->{t} =~ /^Pg/)
+				{
+					last unless $LCL->pg_listAllDbs($verbose);
+				}
+				else
+				{
+					last
+					  unless $LCL->error(
+						"database handle $LCL->{PARSE}->{DBNUMBER} is not a PostgreSQL db handle"
+					  );
+				}
+			}
+
+			# PostgreSQL "\dT" (describeTypes) command
+			elsif ($command =~ /^\\dT(\+)?(?:\s+(\S+))?/)
+			{
+				my ($verbose, $pattern) = ($1, $2);
+
+				if ($LCL->{DB}->[ $LCL->{PARSE}->{DBNUMBER} ]->{t} =~ /^Pg/)
+				{
+					last unless $LCL->pg_describeTypes($pattern, $verbose);
+				}
+				else
+				{
+					last
+					  unless $LCL->error(
+						"database handle $LCL->{PARSE}->{DBNUMBER} is not a PostgreSQL db handle"
+					  );
+				}
+			}
+
+			# PostgreSQL "\df" (describeFunctions) command
+			elsif ($command =~ /^\\df(\+)?(?:\s+(\S+))?/)
+			{
+				my ($verbose, $pattern) = ($1, $2);
+
+				if ($LCL->{DB}->[ $LCL->{PARSE}->{DBNUMBER} ]->{t} =~ /^Pg/)
+				{
+					last unless $LCL->pg_describeFunctions($pattern, $verbose);
+				}
+				else
+				{
+					last
+					  unless $LCL->error(
+						"database handle $LCL->{PARSE}->{DBNUMBER} is not a PostgreSQL db handle"
+					  );
+				}
+			}
+
+			# sql++ "reconnect"/"\R" command
+			elsif ($command =~
+				/^(?:(?-i)\\R(?i)|recon(?:n(?:ect)?)?)(?:\s*(\d+))?$/i)
+			{
+				my $dbNum = (length $1 ? $1 : 0);
+				if ($LCL->{DBH}->[$dbNum])
+				{
+					if ($LCL->setupDB($dbNum))
+					{
+						$LCL->startupMsg($dbNum);
+					}
+				}
+				else
+				{
+					last unless $LCL->error("no such database handle: $dbNum");
+				}
+			}
+
+			# sql++ "connect"/"\r" command
+			elsif ($command =~ /^(?:(?-i)\\r(?i)|connect)(?:\s+(.*?))?\s*$/i)
+			{
+				my $returnVal =
+				  $LCL->getArgs($LCL->{DBNUM} + 1, split(/\s+/, $1));
+				if ($returnVal == 1)
+				{
+					if ($LCL->setupDB($LCL->{DBNUM} + 1))
+					{
+						$LCL->startupMsg(++$LCL->{DBNUM});
+					}
+				}
+				else
+				{
+					$LCL->error(
+						"Usage: CONNECT [-AfpS] [-u user] [-H host] [-P port] [-t type] [-T file] [-X pass] <database>"
+					);
+					last unless $LCL->{DB}->[ $LCL->{DBNUM} ]->{f};
+				}
+			}
+
+			# plain old query
+			else
+			{
+				$command =~ s/^\\u\s*/use /;
+
+				my $returnVal = $LCL->statementParser($command);
+				if ($returnVal == 1)
+				{
+					last
+					  unless (
+						  $LCL->{PARSE}->{SUBSEL}
+						? $LCL->subselQuery()
+						: $LCL->executeQuery()
+					  );
+
+					if ($command =~ /^use/i)
+					{
+						%{ $LCL->{AUTOCOMPLETE} } = ();
+
+						foreach my $dbh (0 .. $#{ $LCL->{DBH} })
+						{
+							map {
+								$LCL->{AUTOCOMPLETE}->{$_} =
+								  [ $LCL->getFields($dbh, $_) ]
+							} $LCL->getTables($dbh);
+						}
+					}
+				}
+				else
+				{
+					last unless $LCL->error($returnVal);
+				}
+			}
+		}
+	}
+}
+
+###
+# execute a query
+sub executeQuery
+{
+	my ($LCL) = @_;
+	my ($rows, $iteration);
+
+	if (
+		$LCL->{DB}->[ $LCL->{PARSE}->{DBNUMBER} ]->{t} eq 'Oracle'
+		&& (   $LCL->{PARSE}->{FUNCTIONS}->[0] eq 'desc'
+			|| $LCL->{PARSE}->{FUNCTIONS}->[0] eq 'describe')
+	  )
+	{
+
+		# functionality for 'desc' with Oracle
+		return $LCL->oracleDesc();
+	}
+
+	elsif (
+		$LCL->{DB}->[ $LCL->{PARSE}->{DBNUMBER} ]->{t} eq 'DB2'
+		&& (   $LCL->{PARSE}->{FUNCTIONS}->[0] eq 'desc'
+			|| $LCL->{PARSE}->{FUNCTIONS}->[0] eq 'describe')
+	  )
+	{
+
+		# functionality for 'desc' with IBM DB2
+		return $LCL->ibmdb2Desc();
+	}
+
+	elsif (
+		$LCL->{DB}->[ $LCL->{PARSE}->{DBNUMBER} ]->{t} eq 'Sybase'
+		&& (   $LCL->{PARSE}->{FUNCTIONS}->[0] eq 'desc'
+			|| $LCL->{PARSE}->{FUNCTIONS}->[0] eq 'describe')
+	  )
+	{
+
+		# functionality for 'desc' with Sybase
+		return $LCL->sybaseDesc();
+	}
+
+	elsif (
+		(
+			   $LCL->{DB}->[ $LCL->{PARSE}->{DBNUMBER} ]->{t} eq 'Pg'
+			|| $LCL->{DB}->[ $LCL->{PARSE}->{DBNUMBER} ]->{t} eq 'PgPP'
+		)
+		&& (   $LCL->{PARSE}->{FUNCTIONS}->[0] eq 'desc'
+			|| $LCL->{PARSE}->{FUNCTIONS}->[0] eq 'describe')
+	  )
+	{
+
+		# functionality for 'desc' with PostgreSQL
+		return $LCL->pg_describeTableDetails($LCL->{PARSE}->{FUNCTIONS}->[1]);
+	}
+
+	elsif (
+		(
+			   $LCL->{DB}->[ $LCL->{PARSE}->{DBNUMBER} ]->{t} eq 'Oracle'
+			|| $LCL->{DB}->[ $LCL->{PARSE}->{DBNUMBER} ]->{t} eq 'Sybase'
+			|| $LCL->{DB}->[ $LCL->{PARSE}->{DBNUMBER} ]->{t} eq 'Excel'
+			|| $LCL->{DB}->[ $LCL->{PARSE}->{DBNUMBER} ]->{t} eq 'mysql'
+			|| $LCL->{DB}->[ $LCL->{PARSE}->{DBNUMBER} ]->{t} eq 'mysqlPP'
+			|| $LCL->{DB}->[ $LCL->{PARSE}->{DBNUMBER} ]->{t} eq 'Pg'
+			|| $LCL->{DB}->[ $LCL->{PARSE}->{DBNUMBER} ]->{t} eq 'PgPP'
+			|| $LCL->{DB}->[ $LCL->{PARSE}->{DBNUMBER} ]->{t} eq 'SQLite'
+			|| $LCL->{DB}->[ $LCL->{PARSE}->{DBNUMBER} ]->{t} eq 'DB2'
+		)
+		&& (
+			(
+				   $LCL->{PARSE}->{FUNCTIONS}->[0] eq 'show'
+				&& $LCL->{PARSE}->{FUNCTIONS}->[1] eq 'tables'
+			)
+			|| $LCL->{PARSE}->{FUNCTIONS}->[0] eq 'list_tables'
+		)
+	  )
+	{
+
+		# functionality for 'show tables' with Excel, Sybase, Oracle, mysql, PostgreSQL, and IBM DB2
+		return $LCL->implShow($LCL->{PARSE}->{DBNUMBER});
+	}
+
+	elsif (!$LCL->{DBH}->[ $LCL->{PARSE}->{DBNUMBER} ])
+	{
+		return $LCL->{DB}->[0]->{f};
+	}
+
+	eval {
+		$LCL->{STH} =
+		  $LCL->{DBH}->[ $LCL->{PARSE}->{DBNUMBER} ]
+		  ->prepare($LCL->{PARSE}->{STATEMENT});
+	};
+
+	($rows, $iteration) =
+	  $LCL->doStatement(0, 1, 0, @{ $LCL->{PARSE}->{ARGUMENTS} });
+
+	undef $LCL->{STH};
+	return ($rows < 0 ? $LCL->{DB}->[ $LCL->{PARSE}->{DBNUMBER} ]->{f} : 1);
+}
+
+###
+# execute a pseudo-subselect query
+sub subselQuery
+{
+	my ($LCL)     = @_;
+	my $iteration = 0;
+	my $tmp       = 0;
+	my $stop      = 0;
+	my $done      = 0;
+	my $dbNumber  = 0;
+	my $nrows     = -1;
+
+	if ($LCL->{PARSE}->{SUBSEL} =~ s/^\s*(?:conn|(?-i)\\c(?i))//i)
+	{
+		if ($LCL->{PARSE}->{SUBSEL} =~ s/^\s+(\d+)\s+//)
+		{
+			$dbNumber = $1;
+		}
+		else
+		{
+			return $LCL->error("Usage: CONN <db handle #> <statement>");
+		}
+	}
+	unless ($LCL->{DBH}->[$dbNumber])
+	{
+		return $LCL->error("no such connection handle number '$dbNumber'");
+	}
+
+	eval {
+		$LCL->{STH2} =
+		      $LCL->{DBH}->[$dbNumber]->prepare($LCL->{PARSE}->{SUBSEL})
+		  and $tmp = $LCL->{STH2}->execute(@{ $LCL->{PARSE}->{ARGUMENTS} });
+	};
+
+	# was the query successful or not
+	if ($tmp && !$@)
+	{
+		if ($LCL->{STH2}->{NUM_OF_FIELDS})
+		{
+			eval {
+
+				# allow pausing of queries
+				local $SIG{INT} = sub {
+					if ($LCL->{STH})
+					{
+						$LCL->prnt(
+							"\r\nQuery paused...continue with query? [Y/n]: ");
+						chomp(my $q = <STDIN>);
+
+						$LCL->spoolLog("$q\n");
+						if ($q !~ /^\s*(?:y.*|)$/i)
+						{
+							$LCL->{STOP} = 1;
+							die;
+						}
+					}
+					else
+					{
+						$LCL->quit("\n");
+					}
+				};
+
+				while (1)
+				{
+					$done = 0;
+					last if ($stop ||= $LCL->checkStop());
+
+					while ($tmp = $LCL->{STH2}->fetchrow_arrayref())
+					{
+						last if $stop = $LCL->checkStop();
+
+						# if the full command hasn't been prepared yet
+						unless ($LCL->{STH})
+						{
+							($LCL->{PARSE}->{STATEMENT}) = $LCL->functionParser(
+								$LCL->{PARSE}->{ORIGSTMT},
+								$LCL->{STH2}->{NUM_OF_FIELDS}
+							);
+							eval {
+								$LCL->{STH} =
+								  $LCL->{DBH}->[ $LCL->{PARSE}->{DBNUMBER} ]
+								  ->prepare($LCL->{PARSE}->{STATEMENT});
+							};
+						}
+
+						$done = 1;
+						($tmp, $iteration) =
+						  $LCL->doStatement($iteration, 0, 0, @{$tmp});
+						return $LCL->{DB}->[ $LCL->{PARSE}->{DBNUMBER} ]->{f}
+						  if $tmp < 0;
+						$nrows += $tmp + ($nrows < 0 ? 1 : 0);
+					}
+
+					$stop ||= $LCL->checkStop();
+					$LCL->{T}->draw($LCL) if $iteration && !$stop;
+					$LCL->{T}->drawEnd($LCL)
+					  if $nrows
+						  && $LCL->{STH}->{NUM_OF_FIELDS}
+						  && !$stop
+						  && $done;
+
+					last
+					  if ($iteration && $iteration != $LCL->{CFG}->{PRINTROWS})
+					  || (!$iteration && !$done);
+				}
+			};
+		}
+		$LCL->rowInfo($nrows) if $nrows >= 0;
+	}
+
+	else { return $LCL->error($@ || $dbNumber) }
+	undef $LCL->{STH};
+	undef $LCL->{STH2};
+	return 1;
+}
+
+########################################################
+#
+# parsers
+#
+###
+# statement parser
+sub statementParser
+{
+	my ($LCL, $statement) = @_;
+
+	%{ $LCL->{PARSE} } = ();
+	$LCL->{PARSE}->{ARGUMENTS} = [];
+
+	# parse data passed to a macro / delimited data
+	if ($statement =~ /^\s*(%[^\s(]+)\s*\((.*)\)$/s)
+	{
+
+		# replace the macro name with the statement
+		$statement = $LCL->{CFG}->{MACROS}->{$1};
+
+		# set the arguments to the macro
+		$LCL->{PARSE}->{ARGUMENTS} = [ $LCL->delimParser($2) ];
+	}
+
+	my @tmp = $LCL->functionParser($statement, 0, $LCL->{PARSE}->{ARGUMENTS});
+	return $tmp[0] if @tmp == 1;
+
+	(
+		$LCL->{PARSE}->{STATEMENT}, $LCL->{PARSE}->{PLACEHOLDERS},
+		$LCL->{PARSE}->{DBNUMBER},  $LCL->{PARSE}->{SUBSEL},
+		$LCL->{PARSE}->{FUNCTIONS}, $LCL->{PARSE}->{ORIGSTMT},
+		$LCL->{PARSE}->{VARIABLEPH}
+	) = @tmp;
+
+	unless ($LCL->{DBH}->[ $LCL->{PARSE}->{DBNUMBER} ])
+	{
+		return "no such connection handle number '$LCL->{PARSE}->{DBNUMBER}'";
+	}
+
+	return 1;
+}
+
+###
+# function parser
+sub functionParser
+{
+	my ($string, %functions);
+	my ($LCL, $statement, $variableFields, $arguments) = @_;
+	my $previousStr  = "";
+	my $currentStr   = "";
+	my $newStatement = "";
+	my ($placeHolders, $varPH) = $LCL->placeHolderParser($statement)
+	  if $statement =~ /\?\?/;
+	my $currentPlaceHolders = 0;
+	my $dbHandleNum         = 0;
+	my $origStatement       = $statement;
+
+	if ($statement =~ s/^\s*(?:conn|(?-i)\\c(?i))//i)
+	{
+		if ($statement =~ s/^\s+(\d+)\s+//)
+		{
+			$dbHandleNum = $1;
+		}
+		else
+		{
+			return "Usage: CONN <db handle #> <statement>";
+		}
+	}
+	my $functions = [ split(/\s+/, lc($statement), 2) ];
+
+	while ($statement =~ s/([a-z]+\s*\(|[^,\?\\"'()a-z]+|.)//i)
+	{
+		$currentStr = $1;
+
+		# importfile() function beginning
+		if ($currentStr =~ /^importfile\s*\($/i && !$string)
+		{
+			$functions{import}[1] = 1;
+		}
+
+		# inside of importfile() function
+		elsif ($functions{import}[1])
+		{
+
+			# find where strings start and end
+			if (
+				($currentStr eq '"' && $string ne "'" && $previousStr ne '\\')
+				|| (   $currentStr eq "'"
+					&& $string ne '"'
+					&& ($LCL->{CFG}->{ESCSINGQUOTE} ? $previousStr ne '\\' : 1))
+			  )
+			{
+				$string = $string ? 0 : $currentStr;
+			}
+
+			# find where a selection ends
+			elsif ($currentStr eq ')' && !$string)
+			{
+				$functions{import}[0]      =~ s/^\s*//;
+				$functions{import}[0]      =~ s/\s*$//;
+				$functions{import}[0]      =~ s/^"(.*)"$/$1/
+				  || $functions{import}[0] =~ s/^'(.*)'$/$1/;
+
+				open(FILE, "<$functions{import}[0]")
+				  || return "can't open $functions{import}[0] for reading: $!";
+				splice(@{$arguments}, $currentPlaceHolders++, 0,
+					join("", <FILE>));
+				close(FILE);
+				undef $functions{import};
+
+				$newStatement .= "?";
+			}
+
+			$functions{import}[0] .= $currentStr;
+		}
+
+		# subsel() function beginning
+		elsif ($currentStr =~ /^subsel\s*\($/i && !$string)
+		{
+			$functions{subsel}[1] = 1;
+		}
+
+		# inside of subsel() function
+		elsif ($functions{subsel}[1])
+		{
+			$functions{subsel}[0] .= $currentStr;
+
+			# find where strings start and end
+			if (
+				($currentStr eq '"' && $string ne "'" && $previousStr ne '\\')
+				|| (   $currentStr eq "'"
+					&& $string ne '"'
+					&& ($LCL->{CFG}->{ESCSINGQUOTE} ? $previousStr ne '\\' : 1))
+			  )
+			{
+				$string = $string ? 0 : $currentStr;
+			}
+
+			# find where a selection starts
+			elsif ($currentStr eq '(' && !$string)
+			{
+				$functions{subsel}[1]++;
+			}
+
+			# find where a selection ends
+			elsif ($currentStr eq ')' && !$string)
+			{
+				unless (--$functions{subsel}[1])
+				{
+
+					# remove the "extra" end-paren since we never put in the starting one
+					chop($functions{subsel}[0]);
+					$newStatement .= join(
+						",",
+						("?") x (
+							     $variableFields
+							  || $LCL->delimParser($functions{subsel}[0])
+						)
+					);
+				}
+			}
+		}
+
+		# we found a placeholder
+		elsif ($currentStr eq '?' && $previousStr ne '?' && !$string)
+		{
+			$currentPlaceHolders++;
+			$newStatement .= $currentStr;
+		}
+
+		# we found a variable placeholder
+		elsif ($variableFields
+			&& $currentStr  eq '?'
+			&& $previousStr eq '?'
+			&& !$string)
+		{
+			$newStatement .= ",?" x ($variableFields - $currentPlaceHolders);
+			$currentPlaceHolders += $variableFields - $currentPlaceHolders;
+		}
+
+		# find where strings start and end
+		elsif (
+			($currentStr eq '"' && $string ne "'" && $previousStr ne '\\')
+			|| (   $currentStr eq "'"
+				&& $string ne '"'
+				&& ($LCL->{CFG}->{ESCSINGQUOTE} ? $previousStr ne '\\' : 1))
+		  )
+		{
+			$string = $string ? 0 : $currentStr;
+			$newStatement .= $currentStr;
+		}
+
+		else
+		{
+			$newStatement .= $currentStr;
+		}
+
+		$previousStr = $currentStr;
+	}
+
+	return ($newStatement, $currentPlaceHolders, $dbHandleNum,
+		$functions{subsel}[0],
+		$functions, $origStatement, $varPH);
+}
+
+###
+# parses delimited data
+sub delimParser
+{
+	my ($string, $currentStr, @arguments);
+	my ($LCL, $data, $delimiter) = @_;
+	$delimiter = ',' unless defined $delimiter;
+	my $previousStr = "";
+	my $argnum      = 0;
+
+	while (length($currentStr = substr($data, 0, 1, "")))
+	{
+
+		if ($currentStr eq $delimiter && !$string)
+		{
+			$arguments[ ++$argnum ] = "";
+		}
+
+		# find where strings start and end
+		elsif (
+			($currentStr eq '"' && $string ne "'" && $previousStr ne '\\')
+			|| (   $currentStr eq "'"
+				&& $string ne '"'
+				&& ($LCL->{CFG}->{ESCSINGQUOTE} ? $previousStr ne '\\' : 1))
+		  )
+		{
+			$arguments[$argnum] = "" unless $string eq $currentStr;
+			$string = $string ? 0 : $currentStr;
+		}
+
+		#    elsif ($currentStr !~ /^\s+$/ || $string || length $arguments[$argnum])
+		elsif (
+			($currentStr ne " " && $currentStr ne "\t" && $currentStr ne "\n")
+			|| $string)
+		{
+			$arguments[$argnum] .= $currentStr;
+		}
+
+		$previousStr = $currentStr;
+	}
+
+	return @arguments;
+}
+
+###
+# parse the number of place-holders in a statement
+sub placeHolderParser
+{
+	my ($string, $currentStr);
+	my ($LCL, $statement) = @_;
+	my $previousStr          = "";
+	my $placeHolders         = 0;
+	my $variablePlaceHolders = 0;
+
+	while (length($currentStr = substr($statement, 0, 1, "")))
+	{
+
+		# we found a placeholder
+		if ($currentStr eq '?' && $previousStr ne '?' && !$string)
+		{
+			$placeHolders++;
+		}
+
+		# we found a variable placeholder
+		elsif ($currentStr eq '?' && $previousStr eq '?' && !$string)
+		{
+			$variablePlaceHolders++;
+		}
+
+		# find where strings start and end
+		elsif (
+			($currentStr eq '"' && $string ne "'" && $previousStr ne '\\')
+			|| (   $currentStr eq "'"
+				&& $string ne '"'
+				&& ($LCL->{CFG}->{ESCSINGQUOTE} ? $previousStr ne '\\' : 1))
+		  )
+		{
+			$string = $string ? 0 : $currentStr;
+		}
+
+		$previousStr = $currentStr;
+	}
+
+	return ($placeHolders, $variablePlaceHolders);
+}
+
+###
+# here is what parses each line of input
+# to get a full command
+sub parser
+{
+	my ($LCL, $data) = @_;
+
+	my ($indata, @data);
+	if ($indata = (defined $data ? 1 : 0))
+	{
+		@data = split /\n/, $data;
+	}
+
+	my (@commands, $command, $string, $end, $currentStr);
+	$LCL->{LASTCMD}    = $LCL->{TMPLASTCMD};
+	$LCL->{TMPLASTCMD} = "";
+	my $line        = "";
+	my $previousStr = "";
+
+	while (1)
+	{
+		if ($string eq '"')
+		{
+			$line = "\n"
+			  . (
+				$indata
+				? shift(@data)
+				: $LCL->{TERM}->readline($LCL->psEval($LCL->{CFG}->{PS3}))
+			  );
+			$LCL->spoolLog($LCL->psEval($LCL->{CFG}->{PS3}));
+			next if $line =~ /^\s*(?:--|#)/;
+		}
+
+		elsif ($string eq "'")
+		{
+			$line = "\n"
+			  . (
+				$indata
+				? shift(@data)
+				: $LCL->{TERM}->readline($LCL->psEval($LCL->{CFG}->{PS4}))
+			  );
+			$LCL->spoolLog($LCL->psEval($LCL->{CFG}->{PS4}));
+			next if $line =~ /^\s*(?:--|#)/;
+		}
+
+		elsif (defined($command))
+		{
+			$line = "\n"
+			  . (
+				$indata
+				? shift(@data)
+				: $LCL->{TERM}->readline($LCL->psEval($LCL->{CFG}->{PS2}))
+			  );
+			$LCL->spoolLog($LCL->psEval($LCL->{CFG}->{PS2}));
+			next if $line =~ /^\s*(?:--|#)/;
+		}
+
+		else
+		{
+			$line = (
+				$indata
+				? shift(@data)
+				: $LCL->{TERM}->readline($LCL->psEval($LCL->{CFG}->{PS1}))
+			);
+			$LCL->spoolLog($LCL->psEval($LCL->{CFG}->{PS1}));
+			next if $line =~ /^\s*(?:--|#)/;
+			$command = 0 if defined($line) && length($line);
+		}
+
+		if (defined($line))
+		{
+			$LCL->spoolLog("$line\n");
+
+			if (defined($command) && $command == 0 && !$string)
+			{
+				if (   $line =~ /^\s*(?:\\|[\?\/\!])/
+					|| $line =~
+					/^\s*(?:use|chdir|(?:dis|re)(?:conn?(?:ect)?)?|exit|quit|rehash)(?:\s|$)/i
+					|| $line =~
+					/^\s*(?:(?:no)?tee|spo(?:ol?)?|ed(?:it?)?|conn(?:ect)?|(?:more)?help|(?:im|o?ex)port)(?)/i
+				  )
+				{
+					$LCL->{TERM}->addhistory($line)
+					  if (!$indata && $line !~ /^(?:(?-i)\\q(?i)|quit|exit)/i);
+					return $line;
+				}
+			}
+
+			(my $strippedLine = $line) =~ s/\n//g;
+			$LCL->{TERM}->addhistory($strippedLine)
+			  if ( $LCL->{CFG}->{SINGLINEHIST}
+				&& length($strippedLine)
+				&& !$indata);
+			$LCL->{TMPLASTCMD} .= $line if !$indata;
+
+			while (length($currentStr = substr($line, 0, 1, "")))
+			{
+
+				# make sure you don't end a 'command' while still inside a "" or ''
+				if (
+					(
+						   $currentStr eq '"'
+						&& $string      ne "'"
+						&& $previousStr ne '\\'
+					)
+					|| (
+						   $currentStr eq "'"
+						&& $string ne '"'
+						&& (
+							  $LCL->{CFG}->{ESCSINGQUOTE}
+							? $previousStr ne '\\'
+							: 1
+						)
+					)
+				  )
+				{
+					$string = $string ? 0 : $currentStr;
+					$commands[$command] .= $currentStr;
+				}
+
+				# find the end of a command and start a new one
+				elsif ($currentStr eq ';' && !$string)
+				{
+					$end = 1;
+					$command++;
+				}
+
+				# find the end of a command and start a new one
+				elsif ($currentStr eq 'g' && $previousStr eq '\\' && !$string)
+				{
+					chop($commands[$command]);
+					$end = 1;
+					$command++;
+				}
+
+				# start a new command
+				elsif ($end
+					&& $currentStr ne " "
+					&& $currentStr ne "\t"
+					&& $currentStr ne "\n")
+				{
+					$end = 0;
+					$commands[$command] .= $currentStr;
+				}
+
+				else
+				{
+					$commands[$command] .= $currentStr;
+				}
+
+				$previousStr = $currentStr;
+
+			}
+
+			# get rid of the command if it's nothing but whitespace
+			if (   defined($command)
+				&& defined($commands[$command])
+				&& $commands[$command] =~ s/^\s*$//)
+			{
+				if ($command == 0)
+				{
+					undef($command);
+				}
+				pop(@commands);
+			}
+		}
+
+		# we hit the end of data
+		if (($indata && !@data) || (!$indata && $end))
+		{
+
+			# extract config options when they're being set
+			# and add history if needed
+			for (my $i = 0 ; $i < @commands ; $i++)
+			{
+				$commands[$i] =~ s/\n*$//;
+				$commands[$i] =~ s/^\n*//;
+
+				if ($commands[$i] =~
+					/^\$?([A-Z0-9]+)\{([^}]+)\}\s*=\s*(.*)\s*$/s)
+				{
+					my ($a, $b, $c) = ($1, $2, $3);
+					$LCL->{CFG}->{$a}->{$b} = $c;
+					$LCL->{CFG}->{$a}->{$b} =~ s/^\s*"(.*)"\s*$/$1/;
+					$LCL->{CFG}->{$a}->{$b} =~ s/\\"/"/g;
+					splice(@commands, $i--, 1);
+				}
+
+				elsif ($commands[$i] =~ /^(%\S+)\s*=\s*(.*)\s*$/s)
+				{
+					$LCL->{CFG}->{MACROS}->{$1} = $2;
+					splice(@commands, $i--, 1);
+				}
+
+				elsif ($commands[$i] =~ /^\$?([A-Z0-9]+)\s*=\s*\[(.*)\]\s*$/s)
+				{
+					@{ $LCL->{CFG}->{$1} } = $LCL->delimParser($2);
+					splice(@commands, $i--, 1);
+				}
+
+				elsif ($commands[$i] =~ /^\$?([A-Z0-9]+)\s*=\s*(.*)\s*$/s)
+				{
+					my ($a, $b) = ($1, $2);
+					$LCL->{CFG}->{$a} = $b;
+					$LCL->{CFG}->{$a} =~ s/^"(.*)"$/$1/;
+					$LCL->{CFG}->{$a} =~ s/\\"/"/g;
+					splice(@commands, $i--, 1);
+				}
+
+				else
+				{
+					$commands[$i] =~ s/^\s*//;
+					$commands[$i] =~ s/\s*$//;
+				}
+
+			}
+			$LCL->{TERM}->addhistory($LCL->{TMPLASTCMD})
+			  unless ($LCL->{CFG}->{SINGLINEHIST} || $indata);
+
+			# return commands
+			return @commands;
+		}
+	}
+}
+
+########################################################
+#
+# general, as well as startup, functions
+#
+###
+# create a term and set it up
+sub setupTerm
+{
+	my ($LCL) = @_;
+
+	$LCL->{TERM}    = new Term::ReadLine 'sql';
+	$LCL->{ATTRIBS} = $LCL->{TERM}->Attribs;
+
+	#    $SIG{INT} = sub { Term::ReadKey::ReadMode(0); $LCL->quit("Later!\n") };
+
+	# auto-completion stuff
+	$LCL->{ATTRIBS}->{attempted_completion_function}   = \&sql_completion;
+	$LCL->{ATTRIBS}->{special_prefixes}                = '%$,';
+	$LCL->{ATTRIBS}->{completion_display_matches_hook} = \&display_matches;
+	$LCL->{ATTRIBS}->{completion_entry_function} =
+	  $LCL->{ATTRIBS}->{list_completion_function};
+
+	#   $LCL->{ATTRIBS}->{completion_word} = [keys %{$LCL->{AUTOCOMPLETE}}];
+
+	# disable implicit add_history() call and change ornaments (e.g., underline)
+	$LCL->{TERM}->ornaments(',,,');
+	$LCL->{TERM}->MinLine(undef);
+
+	return 1;
+}
+
+sub getScreenSize
+{
+	my ($LCL) = @_;
+
+	# get width of screen
+	($LCL->{TERM}->{WIDTH}, $LCL->{TERM}->{HEIGHT}) =
+	  Term::ReadKey::GetTerminalSize();
+
+	$LCL->{TERM}->{WIDTH}  ||= 80;
+	$LCL->{TERM}->{HEIGHT} ||= 24;
+
+	return 1;
+}
+
+###
+# get arguments from command line
+sub getArgs
+{
+	my ($LCL, $dbNumber, @args) = @_;
+	@ARGV = @args;
+
+	my ($defaultDB) = (
+		(
+			sort {
+				$LCL->{CFG}->{DATABASES}->{$b} <=> $LCL->{CFG}->{DATABASES}
+				  ->{$a}
+			  }
+			  keys %{ $LCL->{CFG}->{DATABASES} }
+		)[0]
+	);
+	$defaultDB ||= 'mysql';
+
+	if ($ARGV[-1] =~ /^-/ || !@ARGV)
+	{
+		return $LCL->usage("No database specified", $dbNumber);
+	}
+	$LCL->{DB}->[$dbNumber]->{db} = $LCL->{DB}->[$dbNumber]->{d} = pop(@ARGV);
+
+	Getopt::Std::getopts('ApfLSWu:t:H:P:X:T:O:', $LCL->{DB}->[$dbNumber])
+	  or return $LCL->usage("Invalid arguments", $dbNumber);
+
+	if ($LCL->{DB}->[$dbNumber]->{O})
+	{
+		my %tmpargs =
+		  map { split(/=/, $_, 2) } split(/,/, $LCL->{DB}->[$dbNumber]->{O});
+		foreach (keys %tmpargs)
+		{
+			$LCL->{CFG}->{$_} = $tmpargs{$_};
+		}
+	}
+
+	if ($LCL->{DB}->[$dbNumber]->{p})
+	{
+		print STDERR "Enter password: ";
+
+		local $SIG{INT} = sub {
+			Term::ReadKey::ReadMode(0);
+			$LCL->quit("\n");
+		};
+		Term::ReadKey::ReadMode(2);
+
+		chomp($LCL->{DB}->[$dbNumber]->{X} = <STDIN>);
+
+		Term::ReadKey::ReadMode(0);
+		print "\n";
+	}
+
+	if (lc($LCL->{DB}->[$dbNumber]->{t}) eq lc($defaultDB))
+	{
+
+		#		$LCL->prnt(
+		#			"sql++: your default (most used) database is set to $defaultDB, -t not required\n\n"
+		#		);
+	}
+
+	$LCL->{DB}->[$dbNumber]->{t} ||= $defaultDB;
+	$LCL->{DB}->[$dbNumber]->{D} = $LCL->{DB}->[$dbNumber]->{d};
+
+	my %tmp = map { lc($_) => $_ } DBI->available_drivers;
+	$LCL->{DB}->[$dbNumber]->{t} =
+	  $tmp{ lc($LCL->{DB}->[$dbNumber]->{t})
+	  };    # DBI requires the correct case of the DB type
+	$LCL->{DB}->[$dbNumber]->{t}
+	  or return $LCL->usage("Database type not specified or does not exist",
+		$dbNumber);
+
+	$LCL->{DB}->[$dbNumber]->{u} ||=
+	     ($^O !~ /Win32/i && getpwuid($<))
+	  || getlogin
+	  || $ENV{USER};
+
+	# take care of database name and host
+	if ($LCL->{DB}->[$dbNumber]->{t} eq 'Oracle')
+	{
+		$LCL->{DB}->[$dbNumber]->{H} &&= "host=$LCL->{DB}->[$dbNumber]->{H};";
+		if ($LCL->{DB}->[$dbNumber]->{H})
+		{
+			$LCL->{DB}->[$dbNumber]->{d} = "SID=$LCL->{DB}->[$dbNumber]->{d};";
+		}
+	}
+
+	elsif ($LCL->{DB}->[$dbNumber]->{t} eq 'Excel')
+	{
+		$LCL->{DB}->[$dbNumber]->{d} = "file=$LCL->{DB}->[$dbNumber]->{d}";
+	}
+
+	elsif ($LCL->{DB}->[$dbNumber]->{t} eq 'CSV')
+	{
+		$LCL->{DB}->[$dbNumber]->{d} = "f_dir=$LCL->{DB}->[$dbNumber]->{d}";
+	}
+
+	elsif ($LCL->{DB}->[$dbNumber]->{t} eq 'mysql'
+		|| $LCL->{DB}->[$dbNumber]->{t} eq 'mysqlPP')
+	{
+		$LCL->{DB}->[$dbNumber]->{H} &&= "host=$LCL->{DB}->[$dbNumber]->{H};";
+		$LCL->{DB}->[$dbNumber]->{d} = "database=$LCL->{DB}->[$dbNumber]->{d};";
+	}
+
+	elsif ($LCL->{DB}->[$dbNumber]->{t} eq 'Pg'
+		|| $LCL->{DB}->[$dbNumber]->{t} eq 'PgPP')
+	{
+		$LCL->{DB}->[$dbNumber]->{H} &&= "host=$LCL->{DB}->[$dbNumber]->{H};";
+		$LCL->{DB}->[$dbNumber]->{d} = "dbname=$LCL->{DB}->[$dbNumber]->{d};";
+	}
+
+	elsif ($LCL->{DB}->[$dbNumber]->{t} eq 'SQLite')
+	{
+		$LCL->{DB}->[$dbNumber]->{d} = "dbname=$LCL->{DB}->[$dbNumber]->{d};";
+	}
+
+	elsif ($LCL->{DB}->[$dbNumber]->{t} eq 'DB2')
+	{
+
+		# a hostname would need to be specified in the DB2INSTANCE environment variable
+		$LCL->{DB}->[$dbNumber]->{d} = "$LCL->{DB}->[$dbNumber]->{d};";
+	}
+
+	elsif ($LCL->{DB}->[$dbNumber]->{t} eq 'Sybase')
+	{
+
+		# have to switch around which goes first in the DBI string
+		my $tmp = $LCL->{DB}->[$dbNumber]->{d};
+
+		$LCL->{DB}->[$dbNumber]->{d} = (
+			$LCL->{DB}->[$dbNumber]->{H}
+			? "server:server=$LCL->{DB}->[$dbNumber]->{H}:"
+			  . (
+				$LCL->{DB}->[$dbNumber]->{P}
+				? "$LCL->{DB}->[$dbNumber]->{P}:"
+				: ""
+			  )
+			: ""
+		);
+		$LCL->{DB}->[$dbNumber]->{H} = $tmp ? "database=$tmp" : "";
+		$LCL->{DB}->[$dbNumber]->{P} = "";
+	}
+
+	elsif ($LCL->{DB}->[$dbNumber]->{t} eq 'Proxy')
+	{
+		$LCL->{DB}->[$dbNumber]->{H} &&=
+		  "hostname=$LCL->{DB}->[$dbNumber]->{H};";
+		$LCL->{DB}->[$dbNumber]->{d} = "dsn=$LCL->{DB}->[$dbNumber]->{d};";
+	}
+
+	elsif ($LCL->{DB}->[$dbNumber]->{t} eq 'File')
+	{
+		$LCL->{DB}->[$dbNumber]->{d} = "f_dir=$LCL->{DB}->[$dbNumber]->{d};";
+	}
+
+	else
+	{
+		$LCL->{DB}->[$dbNumber]->{H} &&= "host=$LCL->{DB}->[$dbNumber]->{H};";
+		$LCL->{DB}->[$dbNumber]->{d} = "database=$LCL->{DB}->[$dbNumber]->{d};";
+	}
+
+	$LCL->{DB}->[$dbNumber]->{P} &&= "port=$LCL->{DB}->[$dbNumber]->{P};";
+
+	# take care of username/password
+	if ($LCL->{DB}->[$dbNumber]->{t} eq 'Excel')
+	{
+		$LCL->{DB}->[$dbNumber]->{etc} = [ undef, undef ];
+	}
+	else
+	{
+		$LCL->{DB}->[$dbNumber]->{etc} =
+		  [ $LCL->{DB}->[$dbNumber]->{u}, $LCL->{DB}->[$dbNumber]->{X} ];
+	}
+
+	if (exists($LCL->{DB}->[$dbNumber]->{L}))
+	{
+
+		#$LCL->{CFG}->{OUTPUT}->{FLATTEN_LINE} = $LCL->{DB}->[$dbNumber]->{L};
+		$LCL->{CFG}->{OUTPUT}->{FLATTEN_LINE} = 0;
+	}
+	else
+	{
+		$LCL->{CFG}->{OUTPUT}->{FLATTEN_LINE} = 1;
+	}
+
+	if (exists($LCL->{DB}->[$dbNumber]->{W}))
+	{
+		$LCL->{CFG}->{OUTPUT}->{NO_WRAP} = $LCL->{DB}->[$dbNumber]->{W};
+	}
+	else
+	{
+		$LCL->{CFG}->{OUTPUT}->{NO_WRAP} = 0;
+	}
+
+	return 1;
+}
+
+###
+# help function
+sub help
+{
+	my ($LCL) = @_;
+
+	$LCL->prnt(
+		"sql++ commands:
+help\t\t(\\h)\tDisplay this help.
+morehelp\t(\\M)\tDisplay more help on macros, subselects, multiple connections,
+\t\t\timporting files to fields, delimited imports, and exports.
+%macros\t\t\tType 'morehelp' for help on this.
+?\t\t(\\?)\tSynonym for `help'.
+/\t\t(\\/)\tExecutes last statement or last edited statement.
+!\t\t(\\!)\tExecute [command] in your shell and return the output.
+chdir\t\t(\\cd)\tChange the current working directory.
+conn\t\t(\\c)\tExecute, on database handle number [handle], the [statement].
+\t\t\tType 'morehelp' for help on this.
+connect\t\t(\\r)\tCreate an additional connection to a database.  Arguments
+\t\t\tare the same as on the command line.  Type 'connect' for usage.
+\t\t\tType 'morehelp' for help on this.
+\\d [NAME]\t\tPostgreSQL - describe table, index, sequence, or view.
+\t\t\t(add \"+\" for more detail)
+\\d{t|i|s|v|S} [PATTERN]\tPostgreSQL - list tables/indexes/sequences/views/system tables.
+\t\t\t(add \"+\" for more detail)
+\\da [PATTERN]\t\tPostgreSQL - list aggregate functions.
+\\dd [PATTERN]\t\tPostgreSQL - show comment for object.
+\\dD [PATTERN]\t\tPostgreSQL - list domains.
+\\df [PATTERN]\t\tPostgreSQL - list functions. (add \"+\" for more detail)
+\\do [NAME]\t\tPostgreSQL - list operators.
+\\dp [PATTERN]\t\tPostgreSQL - list table access privileges.
+\\dT [PATTERN]\t\tPostgreSQL - list data types. (add \"+\" for more detail)
+\\du [PATTERN]\t\tPostgreSQL - list users.
+disconnect\t(\\D)\tDisconnect [db handle #].
+edit\t\t(\\e)\tEdit last command, or [file], with \$EDITOR.
+exit\t\t(\\q)\tExit sql++. Same as 'quit'.
+export\t\t(\\E)\tExport data (append) into [file] with [delimiter]
+\t\t\tfrom [statement].  Type 'morehelp' for help on this.
+import\t\t(\\i)\tImport data from [file] with [delimiter] into place-holders
+\t\t\tin [statement] (? = place-holder, ?? = variable # of place-holders)
+\t\t\tType 'morehelp' for help on this.
+importfile()\t\tType 'morehelp' for help on this.
+\\list\t\t(\\l)\tPostgreSQL - list databases.
+notee\t\t(\\t)\tDon't write into outfile.  Same as 'spool off'.
+oexport\t\t(\\O)\tExport data (overwrite) into [file] with [delimiter]
+\t\t\tfrom [statement].
+quit\t\t(\\q)\tQuit sql++.
+reconnect\t(\\R)\tReconnect to the main database or [db handle #].
+rehash\t\t(\\#)\tRebuild completion hash.
+subsel()\t\tType 'morehelp' for help on this.   
+tee\t\t(\\T)\tSet outfile [to_outfile]. Append everything into given outfile.
+\t\t\tSame as 'spool'.
+use\t\t(\\u)\tUse another database. Takes database name as argument.
+\\z\t\t\tPostgreSQL - list table access permissions. (same as \\dp)
+  \n"
+	);
+	return 1;
+}
+
+sub morehelp
+{
+	my ($LCL) = @_;
+
+	$LCL->prnt(
+		"macros -- subselects -- exports -- imports -- multiple connections:
+%name = <statment with placeholders>;
+\t\t\tSets '%name' to the statement.  To specify a place-holder, use a
+\t\t\tquestion mark (?).  e.g.,
+\t\t\t  %name = SELECT * FROM my_tbl WHERE name = ? OR id = ?;
+
+%name(<arguments>);
+%name('data', 123);\tExecutes '%name' and replaces the two
+\t\t\tplace-holders with 'data' and 123.  You must add the same number of
+\t\t\tvalues to the macro arguments list as there are place-holders.  You can
+\t\t\tsee the number of place-holders and statement of a macro by <Tab>ing a
+\t\t\tfew times while completing the macro name.
+
+subsel(<statement>)\tExecutes <statement>, loops through each row returned and executes the
+\t\t\tstatement which subsel() is nested inside of with the data returned
+\t\t\tfrom the row.  e.g.,
+\t\t\t  SELECT * FROM my_tbl WHERE id = subsel(SELECT id FROM other_tbl);
+
+importfile(\"filename\")\tInserts the contents of \"filename\" into the SQL statement.  Useful for
+\t\t\tinserting data into BLOBs, LONGs, etc.  e.g.,
+\t\t\t  INSERT INTO my_tbl(blobfield) VALUES(importfile(\"/etc/passwd\"));
+
+importfile(-)\t\tAllows you to import data from STDIN rather than a file.
+
+export/export <filename> <'delimiter'> <statement>;
+export  file.txt ',' SELECT * FROM tbl;
+oexport file.txt ',' SELECT * FROM tbl;
+\t\t\tExports all fields (delimited by ',') and rows from tbl into file.txt.
+\t\t\t'export' appends to file.txt, 'oexport' overwrites file.txt.  All data
+\t\t\twill be encapsulated in \"\"s and actual double-quotes in data will be escaped.
+
+import <filename> <'delimiter'> [field#1, field#2, ...] <statement>;
+import file.txt ',' INSERT INTO tbl(a, b, c, d)             VALUES(?, ?, ?, ?);
+import file.txt ',' INSERT INTO tbl(a, b, c, d)             VALUES(??);
+import file.txt ',' 3, 2, 1, 0, INSERT INTO tbl(d, c, b, a) VALUES(?, ?, ?, ?);
+\t\t\tAll do the same thing, assuming there are 4 comma-delimited fields per row
+\t\t\tin file.txt.  The third import statement reverses the order of the
+\t\t\tplace-holders based off of the numbers.  The numbers represent the field
+\t\t\tvalue number (minus one) in the delimited text file.  e.g.,
+\t\t\t  import file.txt ',' 3 SELECT ?;
+\t\t\twill select the fourth (0 = first, 1 = second, etc.) field in file.txt.
+\t\t\tA '??' is a variable-number place-holder.  You can use one '??' with as
+\t\t\tmany '?'s as you wish.  e.g.,
+\t\t\t  import file.txt ',' SELECT 'a', ?, 'c', ??, 'g', ?;
+\t\t\tIf file.txt has a row with 'b,d,e,f,h', the output of the select will be
+\t\t\ta, b, c, d, e, f, g, h.
+
+import - '' UPDATE table SET field = \"foo\" WHERE other = ?;
+other_value
+some_other_value
+another_value
+<CTRL+D>
+import - '' SELECT * FROM table WHERE id = ?;
+12
+18
+99
+<CTRL+D>
+\t\t\tYou can use import to read from STDIN (-).  Reading from STDIN makes it
+\t\t\teasy to do multiple queries reading in different values, quickly.
+
+connect [usage options] <database>
+connect -t oracle -u username -p oradb
+\t\t\tCreates a new database handle/connection and returns the handle number.
+\t\t\tYou can use the 'conn' command to execute a statement on that handle.
+
+conn [db handle #] <statement>
+conn 1 SELECT * from ora_table;
+\t\t\tExecutes a statement on a database handle.  The database handle number
+\t\t\tcreated at startup is 0.  You can interface multiple connections with
+\t\t\teach other using the subsel() function and conn.  e.g.,
+\t\t\t  SELECT * FROM my_tbl WHERE id = subsel(conn 1 SELECT id FROM ora_tbl);
+\t\t\tsame as
+\t\t\t  conn 0 SELECT * FROM my_tbl WHERE id = subsel(conn 1 SELECT id FROM ora_tbl);
+
+disconnect <db handle #>
+\t\t\tDisconnects from specified database handle.
+
+reconnect [db handle #]
+\t\t\tReconnects to database handle, if specified.  Otherwise, reconnects from
+\t\t\tdefault database.
+\n"
+	);
+	return 1;
+}
+
+###
+# called for a safe exit
+sub quit
+{
+	my ($LCL, $string) = @_;
+
+	$LCL->prnt($string) if defined $string;    # print a string, if there is any
+	if ($LCL->{TERM})
+	{
+		$LCL->spoolOff();
+
+		unless ($^O =~ /Win32/i)
+		{
+			$LCL->{TERM}->modifying;
+			$LCL->{TERM}->delete_text;
+			$LCL->{ATTRIBS}->{point} = $LCL->{ATTRIBS}->{end} = 0;
+			$LCL->{TERM}->redisplay;
+		}
+
+		$LCL->writeConfig();
+		$LCL->{TERM}->WriteHistory($LCL->{CFG}->{HISTFILE}) if $LCL->{WRTHIST};
+	}
+
+	undef $LCL->{STH};
+	undef $LCL->{STH2};
+
+	foreach (0 .. $#{ $LCL->{DBH} })
+	{
+		$LCL->{DBH}->[$_]->disconnect() if $LCL->{DBH}->[$_];
+	}
+	exit(0);
+}
+
+###
+# usage of sql++
+sub usage
+{
+	my ($LCL, $errstr, $dbNumber) = @_;
+
+	return $errstr if $dbNumber;
+	$errstr = "\nERROR: $errstr\n" if $errstr;
+	my @types = DBI->available_drivers;
+	my $dbs = join ", ", @types;
+	$dbs =~ s/, ([^,]+)$/, and $1/;
+
+	my ($defaultDB) = (
+		(
+			sort {
+				$LCL->{CFG}->{DATABASES}->{$b} <=> $LCL->{CFG}->{DATABASES}
+				  ->{$a}
+			  }
+			  keys %{ $LCL->{CFG}->{DATABASES} }
+		)[0]
+	);
+	$defaultDB ||= 'mysql';
+
+	print << "EOF";
+sql++ $LCL->{VERSION}
+by Samy Kamkar
+$errstr
+Usage:  sql++ [OPTIONS] <database>
+
+OPTIONS:
+  -u username		User for login if not current user.
+  -p			Ask for a password from the tty to use when
+			connecting to a server.
+  -X password		Password to use when connecting to server.
+
+  -H hostname		Connect to host.
+  -P portnum		Port number to use for connection.
+
+  -S (mysql only)	"Safe" mode. Identical to mysql's --safe-updates or
+			--i-am-a-dummy. Helps prevent SQL accidents.
+  -f			Force -- continue statements even if an error
+			occurs in an earlier one.
+  -A			No automatic rehashing. One has to use 'rehash' to
+			get table and field completion. This gives a quicker
+			start of sql++.  This does not disable rehashing on
+			new connections so you must specify -A for each
+			'connect' command you execute.
+
+  -O var1=arg1,var2=arg2,...	Allows setting configuration options
+			from the command line rather than the config file.
+
+  -t type		Type of database to connect to
+			(defaults to the most used database: $defaultDB)
+
+  -T filename		Append everything into filename.  Same as spool/tee
+			command.
+
+  -L			When a border line would wrap around, truncate it
+			instead so it only takes up a single line.
+
+  -W			When a piece of data would wrap around, instead
+			place it on a new line so hopefully it will be all
+			on one line.
+
+  If you wish to add additional database types, read the 'README'.
+  Types of databases available are:
+EOF
+
+	foreach (@types)
+	{
+		print "    $_\n";
+	}
+	print "\n";
+
+	$LCL->quit();
+}
+
+###
+# startup message
+sub startupMsg
+{
+	my ($LCL, $dbNumber) = @_;
+
+	if ($dbNumber == 0)
+	{
+		$LCL->prnt("Welcome to sql++ $LCL->{VERSION}, by Samy Kamkar.\n"
+			  . "Type 'help;' for help.  Type 'morehelp;' for advanced features of sql++.\n"
+		);
+	}
+
+	if (   $LCL->{DB}->[$dbNumber]->{t} eq 'mysql'
+		|| $LCL->{DB}->[$dbNumber]->{t} eq 'mysqlPP')
+	{
+		if ($LCL->{DB}->[$dbNumber]->{S})
+		{
+			$LCL->{DBH}->[$dbNumber]->do("
+        SET SQL_SAFE_UPDATES=1,SQL_SELECT_LIMIT=1000, SQL_MAX_JOIN_SIZE=1000000
+      ");
+		}
+
+		$LCL->prnt(
+			"\nYour mysql connection id is $LCL->{DBH}->[$dbNumber]->{mysql_thread_id} "
+			  . "to server version: $LCL->{DBH}->[$dbNumber]->{mysql_serverinfo}\n"
+		);
+	}
+	$LCL->prnt(
+		"\nCreated connection handle '$dbNumber' to $LCL->{DB}->[$dbNumber]->{db}\n\n"
+	);
+
+	$LCL->{CFG}->{DATABASES}->{ $LCL->{DB}->[$dbNumber]->{t} }++;
+
+	return 1;
+}
+
+###
+# error messages
+sub error
+{
+	my ($LCL, $string) = @_;
+
+	$LCL->{TERM}->ding() unless $^O =~ /Win32/i;
+	if ($string && $string !~ /^\d+$/)
+	{
+		chomp($string);
+		$LCL->prnt("ERROR: $string\n", 1, "bold red");
+
+		if ($string =~ /connection.*lost|gone away/)
+		{
+			my $dbNum = 0;
+			if ($LCL->setupDB($dbNum))
+			{
+				$LCL->startupMsg($dbNum);
+			}
+		}
+	}
+	elsif ($string =~ /^\d+$/)
+	{
+		$LCL->prnt(
+			"ERROR "
+			  . $LCL->{DBH}->[$string]->err . ": "
+			  . $LCL->{DBH}->[$string]->errstr . "\n",
+			1,
+			"bold red"
+		);
+
+		if ($LCL->{DBH}->[$string]->errstr =~ /connection.*lost|gone away/)
+		{
+			my $dbNum = 0;
+			if ($LCL->setupDB($dbNum))
+			{
+				$LCL->startupMsg($dbNum);
+			}
+		}
+	}
+	else
+	{
+		$LCL->prnt(
+			"ERROR "
+			  . (
+				DBI->err ? DBI->err
+				: $LCL->{DBH}->[ $LCL->{PARSE}->{DBNUMBER} ]
+				? $LCL->{DBH}->[ $LCL->{PARSE}->{DBNUMBER} ]->err
+				: "-1"
+			  )
+			  . ": "
+			  . (
+				DBI->errstr ? DBI->errstr
+				: $LCL->{DBH}->[ $LCL->{PARSE}->{DBNUMBER} ]
+				? $LCL->{DBH}->[ $LCL->{PARSE}->{DBNUMBER} ]->errstr
+				: ""
+			  )
+			  . "\n",
+			1,
+			"bold red"
+		);
+
+		if (
+			(
+				DBI->errstr ? DBI->errstr
+				: $LCL->{DBH}->[ $LCL->{PARSE}->{DBNUMBER} ]
+				? $LCL->{DBH}->[ $LCL->{PARSE}->{DBNUMBER} ]->errstr
+				: ""
+			) =~ /connection.*lost|gone away/
+		  )
+		{
+			my $dbNum = 0;
+			if ($LCL->setupDB($dbNum))
+			{
+				$LCL->startupMsg($dbNum);
+			}
+		}
+	}
+
+	return $LCL->{PARSE}->{DBNUMBER}
+	  ? $LCL->{DB}->[ $LCL->{PARSE}->{DBNUMBER} ]->{f}
+	  : (
+		$LCL->{DBNUM} ? $LCL->{DB}->[ $LCL->{DBNUM} ]->{f}
+		: 1
+	  );
+}
+
+###
+# spool writing function
+sub spoolLog
+{
+	my ($LCL, $string) = @_;
+
+	if ($LCL->{SPOOL})
+	{
+		my $tmpfh = $LCL->{SPOOLFH};
+		print $tmpfh $string;
+	}
+	return 1;
+}
+
+###
+# print function that takes care of spooling
+sub prnt
+{
+	my ($LCL, $string, $stderr, $color) = @_;
+
+	$LCL->spoolLog($string);
+	unless ($stderr)
+	{
+		if ($color)
+		{
+			$string =~ s/\n$/Term::ANSIColor::color('reset') . "\n"/e;
+		}
+		print $color ? Term::ANSIColor::colored($string, $color) : $string;
+		return 1;
+	}
+
+	if ($color)
+	{
+		$string =~ s/\n$/Term::ANSIColor::color('reset') . "\n"/e;
+	}
+	print STDERR ($color ? Term::ANSIColor::colored($string, $color) : $string);
+	return 1;
+}
+
+########################################################
+#
+# export/import/pseudo-subselect/etc. functions
+#
+###
+# export to file function
+sub export
+{
+	my ($LCL, $delim, $overwrite) = @_;
+	my ($rows, $tmp);
+
+	unless (open(FILE, (($overwrite ? ">" : ">>") . $LCL->{EXPORTFILE})))
+	{
+		$LCL->error(
+			"couldn't open file '$LCL->{EXPORTFILE}' for appending: $!");
+		return $LCL->{DB}->[ $LCL->{PARSE}->{DBNUMBER} ]->{f};
+	}
+
+	eval {
+		$LCL->{STH} =
+		  $LCL->{DBH}->[ $LCL->{PARSE}->{DBNUMBER} ]
+		  ->prepare($LCL->{PARSE}->{STATEMENT})
+		  and $rows = $LCL->{STH}->execute();
+	};
+
+	if ($rows && !$@)
+	{
+		$rows = sprintf "%d", $rows;
+
+		my $nrows = 0;
+		while ($tmp = $LCL->{STH}->fetchrow_arrayref())
+		{
+			$nrows++;
+			print FILE join($delim, map { s/"/\\"/g; '"' . $_ . '"' } @{$tmp})
+			  . "\n";
+		}
+
+		$rows ||= $nrows;
+		close(FILE);
+
+		$LCL->rowInfo($rows);
+	}
+	else { return $LCL->error($@ || $LCL->{PARSE}->{DBNUMBER}) }
+	undef $LCL->{STH};
+
+	return 1;
+}
+
+###
+# import from file to looped statement function
+sub import
+{
+	my ($LCL, $delim, @fields) = @_;
+	my ($tempLine, $rows, $tmp, @data, $trows);
+	my $iteration = 0;
+
+	# if there are user-defined fields and the number isn't the same as # of place-holders
+	if (@fields != 0 && $LCL->{PARSE}->{PLACEHOLDERS} != @fields)
+	{
+		$LCL->error(
+			"the number of place-holders isn't relative to the number of fields"
+		);
+		return $LCL->{DB}->[ $LCL->{PARSE}->{DBNUMBER} ]->{f};
+	}
+
+	# open the file for importing
+	unless (open(FILE, "<$LCL->{IMPORTFILE}"))
+	{
+		$LCL->error("couldn't open file '$LCL->{IMPORTFILE}' for reading: $!");
+		return $LCL->{DB}->[ $LCL->{PARSE}->{DBNUMBER} ]->{f};
+	}
+
+	my $fields = $LCL->delimParser($tempLine = <FILE>, $delim);
+	if ($LCL->{PARSE}->{VARIABLEPH})
+	{
+		($LCL->{PARSE}->{STATEMENT}, $LCL->{PARSE}->{PLACEHOLDERS}) =
+		  $LCL->functionParser($LCL->{PARSE}->{STATEMENT}, $fields);
+	}
+	if (@fields == 0)
+	{
+		@fields = (0 .. $LCL->{PARSE}->{PLACEHOLDERS} - 1)
+		  if defined($LCL->{PARSE}->{PLACEHOLDERS});
+	}
+	elsif ($fields < @fields)
+	{
+		$LCL->error(
+			"the number of place-holders isn't relative to the number of fields"
+		);
+		return $LCL->{DB}->[ $LCL->{PARSE}->{DBNUMBER} ]->{f};
+	}
+
+	eval {
+		$LCL->{STH} =
+		  $LCL->{DBH}->[ $LCL->{PARSE}->{DBNUMBER} ]
+		  ->prepare($LCL->{PARSE}->{STATEMENT});
+	};
+
+	unless ($LCL->{STH})
+	{
+		close(FILE);
+		return $LCL->error($@);
+	}
+
+	while ($_ = $tempLine || <FILE>)
+	{
+		undef $tempLine;
+
+		@data = $LCL->delimParser($_, $delim);
+		next unless @data >= @fields;
+
+		($rows, $iteration) =
+		  $LCL->doStatement($iteration, 0, 1, @data[@fields]);
+		if ($rows < 0)
+		{
+			close(FILE);
+			return $LCL->{DB}->[ $LCL->{PARSE}->{DBNUMBER} ]->{f};
+		}
+
+		$trows += $rows;
+	}
+
+	$LCL->{T}->draw($LCL) if $iteration;
+	$LCL->{T}->drawEnd($LCL) if $trows && $LCL->{STH}->{NUM_OF_FIELDS};
+	$LCL->rowInfo($trows);
+
+	close(FILE);
+	undef $LCL->{STH};
+
+	return 1;
+}
+
+###
+# function that is used to execute a statement and (possibly) print rows
+sub doStatement
+{
+	my ($LCL, $iteration, $end, $dontClearCols, @data) = @_;
+	my ($rows, $tmp);
+	my $printedRows = 0;
+	my $stop        = 0;
+	my $done        = 0;
+
+	unless ($LCL->{STH})
+	{
+		return $LCL->error($@ || $LCL->{PARSE}->{DBNUMBER}) - 2;
+	}
+	eval { $rows = $LCL->{STH}->execute(@data) };
+
+	if ($rows && !$@)
+	{
+		if ($LCL->{PARSE}->{STATEMENT} =~
+			/^drop\s+(?:temporary\s+)?table\s+(?:if\s+exists\s+)?(.*?)(?:\s+restrict|\s+cascade)?\s*$/i
+		  )
+		{
+			delete $LCL->{AUTOCOMPLETE}->{$_} for split /\s*,\s*/, lc $1;
+		}
+		elsif ($LCL->{PARSE}->{STATEMENT} =~
+			/^create\s+(?:temporary\s+)?table\s+(?:if\s+not\s+exists\s+)?([^\s\(]+)/i
+		  )
+		{
+			$LCL->{AUTOCOMPLETE}->{$1} =
+			  [ $LCL->getFields($LCL->{PARSE}->{DBNUMBER}, $1) ];
+		}
+		elsif ($LCL->{PARSE}->{STATEMENT} =~ /^rename\s+table\s+(.*)$/i)
+		{
+			map {
+				/^(\S+)\s+to\s+(\S+)$/i;
+				$LCL->{AUTOCOMPLETE}->{$2} = $LCL->{AUTOCOMPLETE}->{$1};
+				delete $LCL->{AUTOCOMPLETE}->{$1};
+			  } split /\s*,\s*/,
+			  lc $1;
+		}
+
+		$rows = sprintf "%d", $rows;
+
+		if ($LCL->{STH}->{NUM_OF_FIELDS})
+		{
+			$LCL->{T}->setCols($LCL->{STH}->{NAME}, $dontClearCols);
+			eval {
+
+				# allow pausing of queries
+				local $SIG{INT} = sub {
+					if ($LCL->{STH})
+					{
+						$LCL->prnt(
+							"\r\nQuery paused...continue with query? [Y/n]: ",
+							undef, "bold blink");
+						chomp(my $q = <STDIN>);
+
+						$LCL->spoolLog("$q\n");
+						if ($q !~ /^\s*(?:y.*|)$/i)
+						{
+							$LCL->{STOP} = 1;
+							die;
+						}
+					}
+					else
+					{
+						$LCL->quit("\n");
+					}
+				};
+
+				while (1)
+				{
+					$done = 0;
+					last if ($stop ||= $LCL->checkStop());
+
+					while ($tmp = $LCL->{STH}->fetchrow_arrayref())
+					{
+						last if $stop = $LCL->checkStop();
+
+						$printedRows++;
+						$LCL->{T}->clearRows() if $iteration++ == 0;
+						$LCL->{T}
+						  ->addRow(map { defined $_ ? $_ : "NULL" } @{$tmp});
+
+						if ($iteration == $LCL->{CFG}->{PRINTROWS})
+						{
+							last if $stop = $LCL->checkStop();
+							$LCL->{T}->draw($LCL);
+							$iteration = 0;
+							$done      = 1;
+							last;
+						}
+					}
+
+					last
+					  if ($iteration != $LCL->{CFG}->{PRINTROWS} && $iteration)
+					  || (!$iteration && !$done);
+				}
+			};
+		}
+		$rows = $printedRows if $rows < 1;
+	}
+	else { return $LCL->error($@ || $LCL->{PARSE}->{DBNUMBER}) - 2 }
+
+	if ($end)
+	{
+		$stop ||= $LCL->checkStop();
+		$LCL->{T}->draw($LCL) if $iteration && !$stop;
+		$LCL->{T}->drawEnd($LCL)
+		  if $rows && $LCL->{STH}->{NUM_OF_FIELDS} && !$stop;
+		$LCL->rowInfo($rows);
+	}
+
+	return ($rows, $iteration);
+}
+
+########################################################
+#
+# configuration and setup functions
+#
+###
+# sets up config stuff
+sub setupConfig
+{
+	my ($LCL) = @_;
+
+	if (-f $LCL->{CFGFILE})
+	{
+		$LCL->readConfig();
+	}
+
+	$LCL->{WRTCONF} = $LCL->writeConfig();
+	unless ($LCL->{WRTCONF})
+	{
+		warn "sql++: cannot write config file: $!\n";
+	}
+
+	return $LCL->{WRTCONF};
+}
+
+###
+# reads config file
+sub readConfig
+{
+	my ($LCL) = @_;
+
+	open(CONFIG, "<$LCL->{CFGFILE}") || return 0;
+	my $line = <CONFIG>;
+	if ($line =~ /^[\w{}"']+=\[?'/)
+	{
+		warn "sql++: version of configuartion less than 0.11 detected\n";
+		close(CONFIG);
+
+		warn
+		  "sql++: renaming old config $LCL->{CFGFILE} to $LCL->{CFGFILE}.bak\n";
+		rename($LCL->{CFGFILE}, "$LCL->{CFGFILE}.bak");
+
+		warn "sql++: creating new configuration file\n\n";
+
+		$LCL->{WRTCONF} = $LCL->writeConfig();
+		$line = "";
+
+		open(CONFIG, "<$LCL->{CFGFILE}") || return 0;
+	}
+
+	$LCL->parser($line . join "", <CONFIG>);
+	close(CONFIG);
+
+	# if we don't have the SYS_gettimeofday definition from C header files...
+	unless ($LCL->{CFG}->{SYS_gettimeofday})
+	{
+
+		# let's grab it!
+		$LCL->{CFG}->{SYS_gettimeofday} =
+		  &include("sys/syscall.h", "SYS_gettimeofday");
+		unless ($LCL->{CFG}->{SYS_gettimeofday} =~ /^\d+$/)
+		{
+			$LCL->{CFG}->{SYS_gettimeofday} =
+			  &include("sys/syscall.h", $LCL->{CFG}->{SYS_gettimeofday});
+		}
+
+		# if we didn't get the value for SYS_gettimeofday...
+		unless ($LCL->{CFG}->{SYS_gettimeofday} =~ /^\d+$/)
+		{
+			$LCL->{CFG}->{SYS_gettimeofday} = 0;
+		}
+
+		# now we can do a pure perl (no C/XS! :) gettimeofday() to have a high-resolution timer!
+	}
+
+	return 1;
+}
+
+###
+# edits a tmp sql file
+sub editTmp
+{
+	my ($LCL, $name, $dontrm) = @_;
+
+	my $command;
+
+	my $editor = $LCL->{CFG}->{EDITOR} || $ENV{EDITOR};
+	$name   =~ s/^"([^"]+)"$/$1/ || $name   =~ s/^'([^']+)'$/$1/;
+	$editor =~ s/^"([^"]+)"$/$1/ || $editor =~ s/^'([^']+)'$/$1/;
+
+	if ($editor)
+	{
+		system($editor, $name);
+		open(TMP, "<$name");
+		$command = join "", <TMP>;
+		close(TMP);
+		unlink($name) unless $dontrm;
+
+		$command =~ s/\n*?\/\n*?$//;
+		return $command;
+	}
+	else
+	{
+		$LCL->error("no 'EDITOR' found in sql++ config or environment");
+		return 0;
+	}
+}
+
+###
+# writes a temp file with sql
+sub writeTmp
+{
+	my ($LCL, $command) = @_;
+	my $name = $LCL->{CFG}->{TMPDIR} . ".sql++" . $LCL->randWord(10);
+
+	if (open(TMP, ">$name"))
+	{
+		$command =~ s/;\s*$//;
+		print TMP "$command\n/\n";
+		close(TMP);
+		return $name;
+	}
+	else
+	{
+		$LCL->error("can't open $name for writing: $!");
+		return 0;
+	}
+}
+
+###
+# writes config file
+sub writeConfig
+{
+	my ($LCL) = @_;
+
+	open(CONFIG, ">$LCL->{CFGFILE}") || return 0;
+	foreach my $key (sort keys %{ $LCL->{CFG} })
+	{
+
+		if (ref($LCL->{CFG}->{$key}) eq "ARRAY")
+		{
+			print CONFIG "$key=["
+			  . join(", ",
+				map { s/(^|[^\\])"/$1\\"/g; "\"$_\"" } @{ $LCL->{CFG}->{$key} })
+			  . "];\n";
+		}
+
+		elsif (ref($LCL->{CFG}->{$key}) eq "HASH")
+		{
+			foreach (sort keys %{ $LCL->{CFG}->{$key} })
+			{
+				my $tmp = $LCL->{CFG}->{$key}->{$_};
+				$tmp =~ s/(^|[^\\])"/$1\\"/g;
+				print CONFIG "$key\{$_}=\"$tmp\";\n";
+			}
+		}
+
+		else
+		{
+			my $tmp = $LCL->{CFG}->{$key};
+			$tmp =~ s/(^|[^\\])"/$1\\"/g;
+			print CONFIG "$key=\"$tmp\";\n";
+		}
+
+	}
+	close(CONFIG);
+
+	return 1;
+}
+
+###
+# sets up history
+sub setupHistory
+{
+	my ($LCL) = @_;
+
+	return $LCL->{WRTHIST} = 0 if $^O =~ /Win32/i;
+	$LCL->{TERM}->stifle_history($LCL->{CFG}->{HISTSIZE});
+	if (-f $LCL->{CFG}->{HISTFILE})
+	{
+		$LCL->{TERM}->ReadHistory($LCL->{CFG}->{HISTFILE})
+		  or warn
+		  "sql++: cannot read history file '$LCL->{CFG}->{HISTFILE}': $!\n";
+	}
+
+	$LCL->{WRTHIST} = $LCL->{TERM}->WriteHistory($LCL->{CFG}->{HISTFILE});
+	unless ($LCL->{WRTHIST})
+	{
+		warn "sql++: cannot write history file: $!\n";
+	}
+
+	return $LCL->{WRTHIST};
+}
+
+###
+# set up db
+sub setupDB
+{
+	my ($LCL, $dbNumber) = @_;
+
+	$LCL->{DBH}->[$dbNumber]->disconnect if $LCL->{DBH}->[$dbNumber];
+	my %tmp = map { lc($_) => $_ } DBI->available_drivers;
+	my $tmp = "dbi:"
+	  . ($LCL->{DB}->[$dbNumber]->{t} || "") . ":"
+	  . ($LCL->{DB}->[$dbNumber]->{d} || "")
+	  . ($LCL->{DB}->[$dbNumber]->{H} || "")
+	  . ($LCL->{DB}->[$dbNumber]->{P} || "");
+	$tmp =~ s/;$//;
+
+	my $args;
+	if ($LCL->{DB}->[$dbNumber]->{t} eq 'Oracle')
+	{
+		$args = { AutoCommit => 0 };
+	}
+	elsif ($LCL->{DB}->[$dbNumber]->{t} eq 'mysql'
+		|| $LCL->{DB}->[$dbNumber]->{t} eq 'mysqlPP'
+		|| $LCL->{DB}->[$dbNumber]->{t} eq 'SQLite')
+	{
+		$args = { AutoCommit => 1 };
+	}
+	else
+	{
+		$args = {};
+	}
+
+	$LCL->{DBH}->[$dbNumber] = DBI->connect(
+		$tmp,
+		@{ $LCL->{DB}->[$dbNumber]->{etc} },
+		{ %{ $LCL->{CFG}->{DBATTR} }, %{$args} },
+	);
+
+	if ($LCL->{DBH}->[$dbNumber])
+	{
+		unless ($LCL->{DB}->[$dbNumber]->{A})
+		{
+			map { $LCL->{AUTOCOMPLETE}->{$_} = 1 } $LCL->getTables($dbNumber);
+		}
+		return 1;
+	}
+	else
+	{
+		$LCL->error();
+		$LCL->quit() unless $dbNumber;
+		return 0;
+	}
+}
+
+########################################################
+#
+# completion functions
+#
+###
+# display match list
+sub display_matches
+{
+	my ($matches, $num_matches, $max_length) = @_;
+	$LCL->{TERM}->display_match_list($matches);
+	$LCL->{TERM}->forced_update_display;
+}
+
+###
+# complete stuff
+sub sql_completion
+{
+	my ($text, $line, $start, $end) = @_;
+	my @matches;
+	$LCL->{ATTRIBS}->{completion_append_character} = '';
+
+	#  ($line) = ($LCL->parser($line))[-1];
+
+	if ($text =~ /,$/)
+	{
+		$text .= " ";
+	}
+
+	if ($text =~ /^%/)
+	{
+		$LCL->{ATTRIBS}->{completion_append_character} = '(';
+		@matches = $LCL->{TERM}->completion_matches($text, \&complete_macro);
+	}
+
+	elsif ($line =~ /%[^\s(]+\s*\([^)]*/
+		&& $line !~ /\)\s*;?\s*$/
+		&& $text !~ /^%/)
+	{
+		@matches =
+		  $LCL->{TERM}
+		  ->completion_matches("$text\r$line", \&complete_macro_vars);
+	}
+
+	elsif ($line =~ /^\w*$/)
+	{
+		@matches = $LCL->{TERM}->completion_matches($line, \&complete_funcs);
+	}
+
+	elsif ($line =~ /%[^\s(]+\s*\(/ && $line =~ /\)\s*$/)
+	{
+		$LCL->{TERM}->insert_text("; ");
+	}
+
+	elsif ($line =~ /\$[A-Z0-9]*$/)
+	{
+		@matches = $LCL->{TERM}->completion_matches($line, \&complete_vars);
+	}
+
+=pod
+	# autocompletion of selection data...will require skillz
+	elsif (!$LCL->{DB}->[0]->{A}
+		&& $text !~ /[^\w,]/
+		&& $line =~
+		/^\s*(?:insert\s+into|update|alter\s+(?:table)?|(?:select.*|delete)\s+from)\s+(?:(?:\w+\s*,\s*)*\w+)\s+\w.*(\S+)\s+like\s+('[^']*|"[^"]*)$/i
+	  )
+	{
+		
+	}
+=cut
+
+	elsif (!$LCL->{DB}->[0]->{A}
+		&& $text !~ /[^\w,]/
+		&& $line =~
+		/^\s*(?:insert\s+into|update|alter\s+(?:table)?|(?:select.*|delete)\s+from)\s+(?:(?:\w+\s*,\s*)*\w+)\s+\w/i
+	  )
+	{
+		@matches =
+		  map { /\r/ ? '' : $_ }
+		  $LCL->{TERM}
+		  ->completion_matches("$text\r$line", \&complete_field_names);
+	}
+
+	elsif ($text !~ /\W/ && !$LCL->{DB}->[0]->{A})
+	{
+		@matches =
+		  $LCL->{TERM}->completion_matches($text, \&complete_table_names);
+	}
+
+	elsif ($text =~ /^\w+\.\w*$/ && !$LCL->{DB}->[0]->{A})
+	{
+		@matches =
+		  $LCL->{TERM}->completion_matches($text, \&complete_field_names);
+	}
+
+	elsif ($line =~
+		/(?:^(?:o?export|import|tee|spool)|importfile\s*\()\s*(?:\s+\S)?/i)
+	{
+		@matches =
+		  $LCL->{TERM}->completion_matches($text,
+			$LCL->{ATTRIBS}->{filename_completion_function});
+	}
+	@matches = () unless @matches;
+
+	return @matches;
+}
+
+###
+# scope the auto-completion functions
+{
+	my (@name, $i);
+
+	###
+	# complete typical functions
+	sub complete_funcs
+	{
+		my ($text, $state) = @_;
+
+		my @words = qw/
+		  SELECT
+		  INSERT
+		  ALTER
+		  _DROP
+		  DELETE
+		  GRANT
+		  FLUSH
+		  UPDATE
+		  _TRUNCATE
+		  REPLACE
+		  DO
+		  HANDLER
+		  LOAD
+		  CREATE
+		  REFERENCES
+		  DESC
+		  EVENT
+		  INDEX
+		  TRIGGER
+		  SHOW
+		  EXECUTE
+		  FILE
+		  LOCK
+		  PROCESS
+		  RELOAD
+		  REPLICATION
+		  _SHUTDOWN
+		  SUPER
+		  /;
+
+		# if this is a new word to complete, initialize now.  this
+		# includes saving the length of text for efficiency, and
+		# initializing the index variable to 0
+		unless ($state)
+		{
+			$i    = 0;
+			@name = sort @words;
+		}
+
+		# return the next name which partially matches from the
+		# command list
+		while ($i <= $#name)
+		{
+			$i++;
+			$LCL->{ATTRIBS}->{completion_append_character} = ' ';
+			return $name[ $i - 1 ] if ($name[ $i - 1 ] =~ /^\Q$text\E/i);
+		}
+
+		# if no names matched, then return null
+		return ();
+	}
+
+	###
+	# complete macro name function
+	sub complete_macro
+	{
+		my ($text, $state) = @_;
+
+		# if this is a new word to complete, initialize now.  this
+		# includes saving the length of text for efficiency, and
+		# initializing the index variable to 0
+		unless ($state)
+		{
+			$i    = 0;
+			@name = sort keys(%{ $LCL->{CFG}->{MACROS} });
+		}
+
+		# return the next name which partially matches from the
+		# command list
+		while ($i <= $#name)
+		{
+			$i++;
+			return $name[ $i - 1 ] if ($name[ $i - 1 ] =~ /^\Q$text\E/);
+		}
+
+		# if no names matched, then return null
+		return ();
+	}
+
+	###
+	# complete table name function
+	sub complete_table_names
+	{
+		my ($text, $state) = @_;
+
+		# if this is a new word to complete, initialize now.  this
+		# includes saving the length of text for efficiency, and
+		# initializing the index variable to 0
+		unless ($state)
+		{
+			$i    = 0;
+			@name = sort (keys %{ $LCL->{AUTOCOMPLETE} });
+		}
+
+		# return the next name which partially matches from the
+		# command list
+		while ($i <= $#name)
+		{
+			$i++;
+			if ($name[ $i - 1 ] =~ /^\Q$text\E/i)
+			{
+				if (length($name[ $i - 1 ]) == length($text))
+				{
+					$LCL->{ATTRIBS}->{completion_append_character} =
+					  '.';    # was ' ' before adding field completion
+				}
+				else
+				{
+					$LCL->{ATTRIBS}->{completion_append_character} =
+					  '';     # was ' ' before adding field completion
+				}
+				return $name[ $i - 1 ];
+			}
+		}
+
+		# if no names matched, then return null
+		return ();
+	}
+
+	###
+	# complete field name function
+	sub complete_field_names
+	{
+		my ($ref, $state) = @_;
+
+		my ($text, $line) = split(/\r/, $ref, 2);
+
+		return () if $LCL->{DB}->[0]->{A};
+
+		# if this is a new word to complete, initialize now.  this
+		# includes saving the length of text for efficiency, and
+		# initializing the index variable to 0
+		unless ($state)
+		{
+			$i = 0;
+			if ($line =~
+				/^\s*(?:insert\s+into|update|alter\s+(?:table)?|(?:select.*|delete)\s+from)\s+((?:\w+\s*,\s*)*\w+)/i
+				|| $text =~ /^([^.]*)/)
+			{
+
+				my @tmp;
+				my @tmp2;
+				my $tmp  = $1;
+				my $orig = $1;
+				if ($tmp !~ /\./)
+				{
+					$tmp =~ s/\s//g;
+					my @tables = split(/,/, $tmp);
+					foreach (@tables)
+					{
+						if (ref($LCL->{AUTOCOMPLETE}->{$_})
+							|| !(@tmp = $LCL->getFields(0, $_)))
+						{
+							if (ref($LCL->{AUTOCOMPLETE}->{$_}))
+							{
+								push @tmp2, @{ $LCL->{AUTOCOMPLETE}->{$_} };
+							}
+							else
+							{
+								push @tmp2, @tmp;
+							}
+						}
+						else
+						{
+							push @tmp2, @tmp;
+						}
+					}
+					map { s/^[^.]+\.// } @tmp2;
+					$LCL->{AUTOCOMPLETE}->{$orig} = [ sort @tmp2 ];
+				}
+
+				# get the table fields now so startup doesn't take long
+				elsif (ref($LCL->{AUTOCOMPLETE}->{$tmp})
+					|| !(my @tmp = $LCL->getFields(0, $tmp)))
+				{
+					$LCL->{AUTOCOMPLETE}->{$orig} = [ sort @tmp ];
+				}
+
+				@name = @{ $LCL->{AUTOCOMPLETE}->{$orig} }
+				  if ref($LCL->{AUTOCOMPLETE}->{$orig});
+			}
+		}
+
+		# return the next name which partially matches from the
+		# command list
+		while ($i <= $#name)
+		{
+			$i++;
+			$LCL->{ATTRIBS}->{completion_append_character} = ' ';
+			return $name[ $i - 1 ] if ($name[ $i - 1 ] =~ /^\Q$text\E/i);
+		}
+
+		# if no names matched, then return null
+		return ();
+	}
+
+	###
+	# complete macro variables (actually, shows the number of place-holders)
+	sub complete_macro_vars
+	{
+		my ($ref, $state) = @_;
+		my ($text, $line) = split(/\r/, $ref, 2);
+		my ($macro, $args) = ($line =~ /(%[^(\s]+)(\s*\(.*)$/);
+		my $comma = ($args =~ /,\s*$/ ? 2 : ($args =~ /^\s*\(\s*$/ ? 1 : 0));
+		my $show = 0;
+
+		$LCL->statementParser("$macro$args)");
+		$show =
+		  $LCL->{PARSE}->{PLACEHOLDERS} - scalar @{ $LCL->{PARSE}->{ARGUMENTS} }
+		  if defined($LCL->{PARSE}->{PLACEHOLDERS});
+		@name =
+		  (     "$macro$args"
+			  . ($comma ? "" : ($show ? "," : ""))
+			  . join(",", (("?") x ($show + ($comma == 2 ? 1 : 0))))
+			  . ");");
+
+		if ($show == 0 && ($comma == 0 || $comma == 1))
+		{
+			$LCL->{TERM}->insert_text("); ");
+		}
+
+		elsif ($show && $comma == 0)
+		{
+			$LCL->{TERM}->insert_text(",");
+		}
+
+		else
+		{
+			$LCL->{TERM}->ding();
+			$LCL->prnt("\n@name\t[$LCL->{CFG}->{MACROS}->{$macro};]\n");
+			$LCL->{TERM}->forced_update_display;
+		}
+
+		return ();
+	}
+
+	###
+	# complete config variable names
+	sub complete_vars
+	{
+		my ($text, $state) = @_;
+
+		$text =~ s/^.*;([^;]*)$/$1/;
+
+		# if this is a new word to complete, initialize now.  this
+		# includes saving the length of text for efficiency, and
+		# initializing the index variable to 0
+		unless ($state)
+		{
+			$i = 0;
+			@name = map { "\$$_" } sort (keys(%{ $LCL->{CFG} }));
+		}
+
+		# return the next name which partially matches from the
+		# command list
+		while ($i <= $#name)
+		{
+			$i++;
+
+			if ($name[ $i - 1 ] =~ m/^\Q$text\E/)
+			{
+				(my $val = $name[ $i - 1 ]) =~ s/^\$//;
+				if (ref($LCL->{CFG}->{$val}) eq "HASH")
+				{
+					$LCL->{ATTRIBS}->{completion_append_character} = '{';
+				}
+				elsif (ref($LCL->{CFG}->{$val}) eq "ARRAY")
+				{
+					$LCL->{ATTRIBS}->{completion_append_character} = '=[';
+				}
+				elsif ($LCL->{CFG}->{$val})
+				{
+					$LCL->{ATTRIBS}->{completion_append_character} = '=';
+				}
+				return $name[ $i - 1 ];
+			}
+
+		}
+
+		# if no names matched, then return null
+		return ();
+	}
+
+}
+
+########################################################
+#
+# PostgreSQL functions
+#
+###
+# \da - list aggregate functions
+# Takes an optional regexp to select particular aggregates
+sub pg_describeAggregates
+{
+	my ($LCL, $pattern, $verbose) = @_;
+
+	# There are two kinds of aggregates: ones that work on particular
+	# types and ones that work on all (denoted by input type = "any")
+	my $statement = '
+	SELECT		n.nspname AS "Schema",
+			p.proname AS "Name",
+	CASE		p.proargtypes[0]
+	WHEN		\'pg_catalog."any"\'::pg_catalog.regtype
+	THEN		CAST(\'(all types)\' AS pg_catalog.text)
+	ELSE		pg_catalog.format_type(p.proargtypes[0], NULL)
+	END AS		"Data type",
+			pg_catalog.obj_description(p.oid, \'pg_proc\') AS "Description"
+	FROM		pg_catalog.pg_proc p
+	LEFT JOIN	pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+	WHERE		p.proisagg
+  ';
+
+	$statement =
+	  $LCL->processNamePattern($statement, $pattern, 1, 0, "n.nspname",
+		"p.proname", undef, "pg_catalog.pg_function_is_visible(p.oid)");
+
+	$statement .= "ORDER BY 1, 2, 3;";
+
+	return $LCL->pg_query($statement, "List of aggregate functions");
+}
+
+# \dd - Get object comments
+# Note: This only lists things that actually have a description. For complete
+# lists of things, there are other \d? commands.
+sub pg_objectDescription
+{
+	my ($LCL, $pattern, $verbose) = @_;
+
+	my $statement = '
+	SELECT	DISTINCT tt.nspname AS "Schema",
+		tt.name AS "Name",
+		tt.object AS "Object",
+		d.description AS "Description"
+	FROM	(
+  ';
+
+	# Aggregate descriptions
+	$statement .= "
+	SELECT		p.oid as oid, p.tableoid as tableoid, n.nspname as nspname,
+			CAST(p.proname AS pg_catalog.text) as name,
+			CAST('aggregate' AS pg_catalog.text) as object
+	FROM		pg_catalog.pg_proc p
+	LEFT JOIN	pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+	WHERE		p.proisagg
+  ";
+	$statement =
+	  $LCL->processNamePattern($statement, $pattern, 1, 0, "n.nspname",
+		"p.proname", undef, "pg_catalog.pg_function_is_visible(p.oid)");
+
+	# Function descriptions (except in/outs for datatypes)
+	$statement .= "
+	UNION ALL
+	SELECT		p.oid as oid, p.tableoid as tableoid, n.nspname as nspname,
+			CAST(p.proname AS pg_catalog.text) as name,
+			CAST('function' AS pg_catalog.text) as object
+	FROM		pg_catalog.pg_proc p
+	LEFT JOIN	pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+	WHERE		p.prorettype <> 'pg_catalog.cstring'::pg_catalog.regtype
+	AND		p.proargtypes[0] <> 'pg_catalog.cstring'::pg_catalog.regtype
+	AND		NOT p.proisagg
+  ";
+	$statement =
+	  $LCL->processNamePattern($statement, $pattern, 1, 0, "n.nspname",
+		"p.proname", undef, "pg_catalog.pg_function_is_visible(p.oid)");
+
+	# Operator descriptions (only if operator has its own comment)
+	$statement .= "
+	UNION ALL
+	SELECT		o.oid as oid, o.tableoid as tableoid, n.nspname as nspname,
+			CAST(o.oprname AS pg_catalog.text) as name,
+			CAST('operator' AS pg_catalog.text) as object
+	FROM		pg_catalog.pg_operator o
+	LEFT JOIN	pg_catalog.pg_namespace n ON n.oid = o.oprnamespace
+  ";
+	$statement =
+	  $LCL->processNamePattern($statement, $pattern, 0, 0, "n.nspname",
+		"o.oprname", undef, "pg_catalog.pg_operator_is_visible(o.oid)");
+
+	# Type description
+	$statement .= "
+	UNION ALL
+	SELECT		t.oid as oid, t.tableoid as tableoid, n.nspname as nspname,
+			pg_catalog.format_type(t.oid, NULL) as name,
+			CAST('data type' AS pg_catalog.text) as object
+	FROM		pg_catalog.pg_type t
+	LEFT JOIN	pg_catalog.pg_namespace n ON n.oid = t.typnamespace
+  ";
+	$statement =
+	  $LCL->processNamePattern($statement, $pattern, 0, 0, "n.nspname",
+		"pg_catalog.format_type(t.oid, NULL)",
+		undef, "pg_catalog.pg_type_is_visible(t.oid)");
+
+	# Relation (tables, views, indexes, sequences) descriptions
+	$statement .= "
+	UNION ALL
+	SELECT		c.oid as oid, c.tableoid as tableoid, n.nspname as nspname,
+			CAST(c.relname AS pg_catalog.text) as name, CAST(
+	CASE c.relkind	WHEN 'r' THEN 'table'
+			WHEN 'v' THEN 'view'
+			WHEN 'i' THEN 'index'
+			WHEN 'S' THEN 'sequence'
+	END		AS pg_catalog.text) as object
+	FROM		pg_catalog.pg_class c
+	LEFT JOIN	pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+	WHERE		c.relkind IN ('r', 'v', 'i', 'S')
+  ";
+	$statement =
+	  $LCL->processNamePattern($statement, $pattern, 1, 0, "n.nspname",
+		"c.relname", undef, "pg_catalog.pg_table_is_visible(c.oid)");
+
+	# Rule description (ignore rules for views)
+	$statement .= "
+	UNION ALL
+	SELECT		r.oid as oid, r.tableoid as tableoid, n.nspname as nspname,
+			CAST(r.rulename AS pg_catalog.text) as name,
+			CAST('rule' AS pg_catalog.text) as object
+	FROM		pg_catalog.pg_rewrite r
+	JOIN		pg_catalog.pg_class c ON c.oid = r.ev_class
+	LEFT JOIN	pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+	WHERE		r.rulename != '_RETURN'
+  ";
+
+	# XXX not sure what to do about visibility rule here?
+	$statement =
+	  $LCL->processNamePattern($statement, $pattern, 1, 0, "n.nspname",
+		"r.rulename", undef, "pg_catalog.pg_table_is_visible(c.oid)");
+
+	# Trigger description
+	$statement .= "
+	UNION ALL
+	SELECT		t.oid as oid, t.tableoid as tableoid, n.nspname as nspname,
+			CAST(t.tgname AS pg_catalog.text) as name,
+			CAST('trigger' AS pg_catalog.text) as object
+	FROM		pg_catalog.pg_trigger t
+	JOIN		pg_catalog.pg_class c ON c.oid = t.tgrelid
+	LEFT JOIN	pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+  ";
+
+	# XXX not sure what to do about visibility rule here?
+	$statement =
+	  $LCL->processNamePattern($statement, $pattern, 0, 0, "n.nspname",
+		"t.tgname", undef, "pg_catalog.pg_table_is_visible(c.oid)");
+
+	$statement .= "
+	)	AS tt
+	JOIN	pg_catalog.pg_description d
+	ON(	tt.oid = d.objoid
+	AND	tt.tableoid = d.classoid
+	AND	d.objsubid = 0
+	)	ORDER BY 1, 2, 3;
+  ";
+
+	return $LCL->pg_query($statement, "Object descriptions");
+}
+
+###
+# \dT - describe data types
+sub pg_describeTypes
+{
+	my ($LCL, $pattern, $verbose) = @_;
+
+	my $statement = '
+	SELECT	n.nspname as "Schema",
+		pg_catalog.format_type(t.oid, NULL) AS "Name",
+  ';
+
+	if ($verbose)
+	{
+		$statement .= '
+			t.typname AS "Internal name",
+	CASE WHEN	t.typrelid != 0
+	THEN		CAST(\'tuple\' AS pg_catalog.text)
+	WHEN		t.typlen < 0
+	THEN		CAST(\'var\' AS pg_catalog.text)
+	ELSE		CAST(t.typlen AS pg_catalog.text)
+	END AS		"Size",
+    ';
+	}
+
+	$statement .= '
+			pg_catalog.obj_description(t.oid, \'pg_type\') AS "Description"
+	FROM		pg_catalog.pg_type t
+	LEFT JOIN	pg_catalog.pg_namespace n ON n.oid = t.typnamespace
+  ';
+
+	# do not include array types (start with underscore); do not include
+	# complex types (typrelid!=0) unless they are standalone composite types
+	$statement .= "
+	WHERE	(t.typrelid = 0
+		OR (
+			SELECT	c.relkind = 'c'
+			FROM	pg_catalog.pg_class c
+			WHERE	c.oid = t.typrelid
+		))
+	AND	t.typname !~ '^_'
+  ";
+
+	# Match name pattern against either internal or external name
+	$statement = $LCL->processNamePattern(
+		$statement, $pattern, 1, 0, "n.nspname", "t.typname",
+		"pg_catalog.format_type(t.oid, NULL)",
+		"pg_catalog.pg_type_is_visible(t.oid)"
+	);
+
+	$statement .= "ORDER BY 1, 2;";
+
+	return $LCL->pg_query($statement, "List of data types");
+}
+
+###
+# \do - list operators
+sub pg_describeOperators
+{
+	my ($LCL, $pattern, $verbose) = @_;
+
+	my $statement = '
+	SELECT		n.nspname as "Schema",
+			o.oprname AS "Name",
+	CASE WHEN	o.oprkind=\'l\'
+	THEN NULL ELSE	pg_catalog.format_type(o.oprleft, NULL) END AS "Left arg type",
+        CASE WHEN	o.oprkind=\'r\'
+	THEN NULL ELSE	pg_catalog.format_type(o.oprright, NULL) END AS "Right arg type",
+			pg_catalog.format_type(o.oprresult, NULL) AS "Result type",
+			coalesce(pg_catalog.obj_description(o.oid, \'pg_operator\'),
+			pg_catalog.obj_description(o.oprcode, \'pg_proc\')) AS "Description"
+	FROM		pg_catalog.pg_operator o
+	LEFT JOIN	pg_catalog.pg_namespace n ON n.oid = o.oprnamespace
+  ';
+
+	$statement =
+	  $LCL->processNamePattern($statement, $pattern, 0, 1, "n.nspname",
+		"o.oprname", undef, "pg_catalog.pg_operator_is_visible(o.oid)");
+
+	$statement .= "ORDER BY 1, 2, 3, 4;";
+
+	return $LCL->pg_query($statement, "List of operators");
+}
+
+###
+# \dD - describe domains
+sub pg_listDomains
+{
+	my ($LCL, $pattern, $verbose) = @_;
+
+	my $statement = '
+	SELECT		n.nspname as "Schema",
+			t.typname as "Name",
+			pg_catalog.format_type(t.typbasetype, t.typtypmod) as "Type",
+	CASE WHEN	t.typnotnull AND t.typdefault IS NOT NULL THEN \'not null default \'||t.typdefault
+	WHEN		t.typnotnull AND t.typdefault IS NULL THEN \'not null\'
+	WHEN NOT	t.typnotnull AND t.typdefault IS NOT NULL THEN \'default \'||t.typdefault
+	ELSE		\'\' END AS "Modifier"
+	FROM		pg_catalog.pg_type t
+	LEFT JOIN	pg_catalog.pg_namespace n ON n.oid = t.typnamespace
+	WHERE		t.typtype = \'d\'
+  ';
+
+	$statement =
+	  $LCL->processNamePattern($statement, $pattern, 1, 0, "n.nspname",
+		"t.typname", undef, "pg_catalog.pg_type_is_visible(t.oid)");
+
+	$statement .= "ORDER BY 1, 2;";
+
+	return $LCL->pg_query($statement, "List of domains");
+}
+
+###
+# \z, \dp - List Tables Grant/Revoke Permissions
+sub pg_permissionsList
+{
+	my ($LCL, $pattern, $verbose) = @_;
+
+	# we ignore indexes and toast tables since they have no meaningful rights
+	my $statement = '
+	SELECT		n.nspname as "Schema",
+			c.relname as "Table",
+			c.relacl as "Access privileges"
+	FROM		pg_catalog.pg_class c
+	LEFT JOIN	pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+	WHERE		c.relkind IN (\'r\', \'v\', \'S\')
+  ';
+
+	# Unless a schema pattern is specified, we suppress system and temp
+	# tables, since they normally aren't very interesting from a
+	# permissions point of view.  You can see 'em by explicit request
+	# though, eg with \z pg_catalog.*
+	$statement =
+	  $LCL->processNamePattern($statement, $pattern, 1, 0, "n.nspname",
+		"c.relname", undef,
+		"pg_catalog.pg_table_is_visible(c.oid) AND n.nspname !~ '^pg_'");
+
+	$statement .= "ORDER BY 1, 2;";
+
+	return $LCL->pg_query($statement,
+		"Access privileges for database \"$LCL->{DB}->[$LCL->{PARSE}->{DBNUMBER}]->{D}\""
+	);
+}
+
+###
+# describeTableDetails (for \d)
+# This routine finds the tables to be displayed, and calls
+# describeOneTableDetails for each one.
+sub pg_describeTableDetails
+{
+	my ($LCL, $pattern, $verbose) = @_;
+	my ($rows, $tmp);
+
+	# Get general table info
+	my $statement = '
+	SELECT		c.oid, n.nspname, c.relname
+	FROM		pg_catalog.pg_class c
+	LEFT JOIN	pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+  ';
+	$statement =
+	  $LCL->processNamePattern($statement, $pattern, 0, 1, "n.nspname",
+		"c.relname", undef, "pg_catalog.pg_table_is_visible(c.oid)");
+	$statement .= "ORDER BY 2, 3;";
+
+	eval {
+		$LCL->{STH} =
+		      $LCL->{DBH}->[ $LCL->{PARSE}->{DBNUMBER} ]->prepare($statement)
+		  and $rows = $LCL->{STH}->execute();
+	};
+	unless ($rows > 0)
+	{
+		$LCL->error("Did not find any relation named \"$pattern\".");
+		return 1;
+	}
+
+	while ($tmp = $LCL->{STH}->fetchrow_arrayref())
+	{
+		$LCL->pg_describeOneTableDetails($$tmp[1], $$tmp[2], $$tmp[0], $verbose)
+		  || return 0;
+	}
+
+	return 1;
+}
+
+###
+# describeOneTableDetails (for \d)
+# Unfortunately, the information presented here is so complicated that it
+# cannot be done in a single query. So we have to assemble the printed table
+# by hand and print it.
+# If the $retFields value is true, just return an array reference to the
+# list of field names for the table.
+sub pg_describeOneTableDetails
+{
+	my ($LCL, $schemaname, $relationname, $oid, $verbose, $retFields) = @_;
+	my ($indisunique, $indisprimary, $indamname, $indtable, $indpred, $i,
+		$iteration);
+	my (
+		$rows,   $rows2,    $tmpbuf, $hasindex, $relkind,
+		$checks, $triggers, $title,  $tmp
+	);
+	my (@cells, @headers, @footers, @tmp, $view_def, $hasrules, $cols,
+		$show_modifiers);
+
+	# Get general table info
+	my $statement = "
+	SELECT	relhasindex, relkind, relchecks, reltriggers, relhasrules
+	FROM	pg_catalog.pg_class WHERE oid = '$oid'
+  ";
+
+	eval {
+		$LCL->{STH2} =
+		      $LCL->{DBH}->[ $LCL->{PARSE}->{DBNUMBER} ]->prepare($statement)
+		  and $rows = $LCL->{STH2}->execute();
+	};
+	return $LCL->error($@) unless $rows && !$@;
+
+	# Did we get anything?
+	unless ($rows)
+	{
+		$LCL->error("Did not find any relation with oid $oid.");
+		return 1;
+	}
+
+	@tmp      = $LCL->{STH2}->fetchrow_array();
+	$hasindex = $tmp[0] eq 't';
+	$relkind  = $tmp[1];
+	$checks   = $tmp[2];
+	$triggers = $tmp[3];
+	$hasrules = $tmp[4] eq 't';
+	$cols     = 2;
+	@headers  = qw/Column Type/;
+
+	if ($relkind eq 'r' || $relkind eq 'v')
+	{
+		$show_modifiers = 1;
+		$headers[ $cols++ ] = "Modifiers";
+	}
+
+	if ($verbose)
+	{
+		$headers[ $cols++ ] = "Description";
+	}
+
+	# Get column info (index requires additional checks)
+	if ($relkind eq 'i')
+	{
+		$statement = "
+	SELECT		CASE i.indproc
+	WHEN		('-'::pg_catalog.regproc)
+	THEN		a.attname
+	ELSE		SUBSTR(pg_catalog.pg_get_indexdef(attrelid),
+	POSITION	('(' in pg_catalog.pg_get_indexdef(attrelid)))
+	END,
+    ";
+	}
+	else
+	{
+		$statement = "SELECT a.attname,";
+	}
+	$statement .=
+	  "pg_catalog.format_type(a.atttypid, a.atttypmod),a.attnotnull, a.atthasdef, a.attnum";
+
+	if ($verbose)
+	{
+		$statement .= ", pg_catalog.col_description(a.attrelid, a.attnum)";
+	}
+	$statement .= " FROM pg_catalog.pg_attribute a";
+
+	if ($relkind eq 'i')
+	{
+		$statement .= ", pg_catalog.pg_index i";
+	}
+	$statement .= "
+	WHERE	a.attrelid = '$oid'
+	AND	a.attnum > 0
+	AND NOT	a.attisdropped
+  ";
+
+	if ($relkind eq 'i')
+	{
+		$statement .= " AND a.attrelid = i.indexrelid";
+	}
+	$statement .= " ORDER BY a.attnum";
+
+	eval {
+		$LCL->{STH2} =
+		      $LCL->{DBH}->[ $LCL->{PARSE}->{DBNUMBER} ]->prepare($statement)
+		  and $rows = $LCL->{STH2}->execute();
+	};
+	return $LCL->error($@) unless $rows && !$@;
+
+	# Check if table is a view
+	if ($relkind eq 'v')
+	{
+		$statement = "SELECT pg_catalog.pg_get_viewdef('$oid'::pg_catalog.oid)";
+		eval {
+			$LCL->{STH3} =
+			  $LCL->{DBH}->[ $LCL->{PARSE}->{DBNUMBER} ]->prepare($statement)
+			  and $rows2 = $LCL->{STH3}->execute();
+		};
+		return $LCL->error($@) unless $rows2 && !$@;
+
+		($view_def) = $LCL->{STH3}->fetchrow_array();
+	}
+
+	# Generate table cells to be printed
+	# note: initialize all cells[] to NULL in case of error exit
+	$i = 0;
+	while (@tmp = $LCL->{STH2}->fetchrow_array)
+	{
+
+		# Name
+		$cells[ $i * $cols ] = $tmp[0];
+
+		# Type
+		$cells[ $i * $cols + 1 ] = $tmp[1];
+
+		# Extra: not null and default
+		# (I'm cutting off the 'default' string at 128)
+		if ($show_modifiers)
+		{
+			$tmpbuf = "not null" if $tmp[2] eq 't';
+
+			# handle "default" here
+			if ($tmp[3] eq 't')
+			{
+				$statement = "
+		SELECT	substring(d.adsrc for 128)
+		FROM	pg_catalog.pg_attrdef d
+		WHERE	d.adrelid = '$oid' AND d.adnum = $tmp[4]
+        ";
+				eval {
+					$LCL->{STH3} =
+					  $LCL->{DBH}->[ $LCL->{PARSE}->{DBNUMBER} ]
+					  ->prepare($statement)
+					  and $rows2 = $LCL->{STH3}->execute();
+				};
+				return $LCL->error($@) unless $rows2 && !$@;
+
+				$tmpbuf &&= "$tmpbuf ";
+				$tmpbuf .= "default "
+				  . ($rows2 ? ($LCL->{STH3}->fetchrow_array())[0] : "?") . ",";
+			}
+
+			$cells[ $i * $cols + 2 ] = $tmpbuf;
+		}
+
+		# Description
+		if ($verbose)
+		{
+			$cells[ $i * $cols + $cols - 1 ] = $tmp[5];
+		}
+
+		$i++;
+	}
+
+	# Make title
+	$title = ${
+		{
+			r => "Table",
+			v => "View",
+			S => "Sequence",
+			i => "Index",
+			s => "Special relation",
+			t => "TOAST table",
+			c => "Composite type",
+		}
+	  }{$relkind}
+	  || "?$relkind?";
+	$title .= " \"$schemaname.$relationname\"";
+
+	# Make footers
+	if ($relkind eq 'i')
+	{
+
+		# Footer information about an index
+		$statement = "
+	SELECT	i.indisunique, i.indisprimary, a.amname, c2.relname,
+		pg_catalog.pg_get_expr(i.indpred, i.indrelid)
+	FROM	pg_catalog.pg_index i, pg_catalog.pg_class c, pg_catalog.pg_class c2, pg_catalog.pg_am a
+	WHERE	i.indexrelid = c.oid
+	AND	c.oid = '$oid'
+	AND	c.relam = a.oid
+	AND	i.indrelid = c2.oid
+    ";
+		eval {
+			$LCL->{STH2} =
+			  $LCL->{DBH}->[ $LCL->{PARSE}->{DBNUMBER} ]->prepare($statement)
+			  and $rows = $LCL->{STH2}->execute();
+		};
+		return $LCL->error($@) unless $rows && !$@;
+
+		($indisunique, $indisprimary, $indamname, $indtable, $indpred) =
+		  $LCL->{STH2}->fetchrow_array();
+		$tmpbuf = "";
+		if ($indisprimary eq 't')
+		{
+			$tmpbuf = "primary key, ";
+		}
+		elsif ($indisunique eq 't')
+		{
+			$tmpbuf = "unique, ";
+		}
+		$tmpbuf .= "$indamname, ";
+
+		# we assume here that index and table are in same schema
+		$tmpbuf .= "for table \"$schemaname.$indtable\"";
+
+		if (length($indpred))
+		{
+			$tmpbuf .= ", predicate $indpred";
+		}
+
+		@footers = ($tmpbuf);
+	}
+	elsif ($view_def)
+	{
+		my ($rule_count, $count_footers) = (0, 0);
+
+		# count rules other than the view rule
+		if ($hasrules)
+		{
+			$statement = "
+	SELECT	r.rulename
+	FROM	pg_catalog.pg_rewrite r
+	WHERE	r.ev_class = '$oid'
+	AND	r.rulename != '_RETURN'
+      ";
+			eval {
+				$LCL->{STH2} =
+				  $LCL->{DBH}->[ $LCL->{PARSE}->{DBNUMBER} ]
+				  ->prepare($statement)
+				  and $rule_count = $LCL->{STH2}->execute();
+			};
+			return $LCL->error($@) unless $rule_count && !$@;
+		}
+
+		# Footer information about a view
+		$footers[ $count_footers++ ] = "View definition: $view_def";
+
+		# print rules
+		$i = 0;
+		while ($rule_count && (@tmp = $LCL->{STH2}->fetchrow_array()))
+		{
+			$statement = (($i ? " " x 7 : "Rules: ") . $tmp[0]);
+			$statement .= "," if $i < $rule_count - 1;
+			$i++;
+			$footers[ $count_footers++ ] = $statement;
+		}
+	}
+	elsif ($relkind eq 'r')
+	{
+
+		# Footer information about a table
+		my (
+			$check_count, $index_count,   $foreignkey_count,
+			$rule_count,  $trigger_count, $count_footers
+		) = (0) x 6;
+
+		# count indexes
+		if ($hasindex)
+		{
+			$statement .= "
+	SELECT		c2.relname, i.indisprimary, i.indisunique,
+			pg_catalog.pg_get_indexdef(i.indexrelid)
+	FROM		pg_catalog.pg_class c, pg_catalog.pg_class c2, pg_catalog.pg_index i
+	WHERE		c.oid = '$oid'
+	AND		c.oid = i.indrelid
+	AND		i.indexrelid = c2.oid
+	ORDER BY	i.indisprimary DESC, i.indisunique DESC, c2.relname
+      ";
+			eval {
+				$LCL->{STH1} =
+				  $LCL->{DBH}->[ $LCL->{PARSE}->{DBNUMBER} ]
+				  ->prepare($statement)
+				  and $index_count = $LCL->{STH1}->execute();
+			};
+			return $LCL->error($@) unless $index_count && !$@;
+		}
+
+		# count table (and column) check constraints
+		if ($checks)
+		{
+			$statement .= "
+	SELECT	consrc, conname
+	FROM	pg_catalog.pg_constraint r
+	WHERE	r.conrelid = '$oid'
+	AND	r.contype = 'c'
+      ";
+			eval {
+				$LCL->{STH2} =
+				  $LCL->{DBH}->[ $LCL->{PARSE}->{DBNUMBER} ]
+				  ->prepare($statement)
+				  and $check_count = $LCL->{STH2}->execute();
+			};
+			return $LCL->error($@) unless $check_count && !$@;
+		}
+
+		# count rules
+		if ($hasrules)
+		{
+			$statement .= "
+	SELECT	r.rulename
+	FROM	pg_catalog.pg_rewrite r
+	WHERE	r.ev_class = '$oid'
+      ";
+			eval {
+				$LCL->{STH3} =
+				  $LCL->{DBH}->[ $LCL->{PARSE}->{DBNUMBER} ]
+				  ->prepare($statement)
+				  and $rule_count = $LCL->{STH3}->execute();
+			};
+			return $LCL->error($@) unless $rule_count && !$@;
+		}
+
+		# count triggers (but ignore foreign-key triggers)
+		if ($triggers)
+		{
+			$statement .= "
+	SELECT	t.tgname
+	FROM	pg_catalog.pg_trigger t
+	WHERE	t.tgrelid = '$oid'
+	AND(	not tgisconstraint
+		OR NOT EXISTS(
+		SELECT	1
+		FROM	pg_catalog.pg_depend d
+		JOIN	pg_catalog.pg_constraint c
+		ON	(d.refclassid = c.tableoid AND d.refobjid = c.oid)
+		WHERE	d.classid = t.tableoid
+		AND	d.objid = t.oid
+		AND	d.deptype = 'i'
+		AND	c.contype = 'f'
+		)
+	)
+      ";
+			eval {
+				$LCL->{STH4} =
+				  $LCL->{DBH}->[ $LCL->{PARSE}->{DBNUMBER} ]
+				  ->prepare($statement)
+				  and $trigger_count = $LCL->{STH4}->execute();
+			};
+			return $LCL->error($@) unless $trigger_count && !$@;
+		}
+
+		# count foreign-key constraints (there are none if no triggers)
+		if ($triggers)
+		{
+			$statement .= "
+	SELECT	conname, pg_catalog.pg_get_constraintdef(oid) as condef
+	FROM	pg_catalog.pg_constraint r
+	WHERE	r.conrelid = '$oid' AND r.contype = 'f'
+      ";
+			eval {
+				$LCL->{STH5} =
+				  $LCL->{DBH}->[ $LCL->{PARSE}->{DBNUMBER} ]
+				  ->prepare($statement)
+				  and $foreignkey_count = $LCL->{STH5}->execute();
+			};
+			return $LCL->error($@) unless $foreignkey_count && !$@;
+		}
+
+		# print indexes
+		$i = 0;
+		while ($index_count && (@tmp = $LCL->{STH1}->fetchrow_array()))
+		{
+			my $indexdef;
+
+			if ($i == 0)
+			{
+				$statement = "Indexes: $tmp[0]";
+			}
+			else
+			{
+				$statement = " " x 9 . $tmp[0];
+			}
+
+			# Label as primary key or unique (but not both)
+			$statement .=
+			  $tmp[1] eq 't' ? " primary key" : $tmp[2] eq 't' ? " unique" : "";
+
+			# Everything after "USING" is echoed verbatim
+			$indexdef = $tmp[3];
+			$indexdef =~ s/^.*? USING //;
+			$statement .= " $indexdef";
+
+			if ($i < $index_count - 1)
+			{
+				$statement .= ",";
+			}
+
+			$footers[ $count_footers++ ] = $statement;
+			$i++;
+		}
+
+		# print check constraints
+		$i = 0;
+		while ($check_count && (@tmp = $LCL->{STH2}->fetchrow_array()))
+		{
+			if ($i == 0)
+			{
+				$statement = "Check constraints: \"$tmp[1]\" $tmp[0]";
+			}
+			else
+			{
+				$statement = " " x 19 . "\"$tmp[1]\" $tmp[0]";
+			}
+
+			$footers[ $count_footers++ ] = $statement;
+			$i++;
+		}
+
+		# print foreign key constraints
+		$i = 0;
+		while ($foreignkey_count && (@tmp = $LCL->{STH5}->fetchrow_array()))
+		{
+			if ($i == 0)
+			{
+				$statement = "Foreign Key constraints: $tmp[0] $tmp[1]";
+			}
+			else
+			{
+				$statement = " " x 25 . "$tmp[0] $tmp[1]";
+			}
+
+			if ($i < $foreignkey_count - 1)
+			{
+				$statement .= ",";
+			}
+
+			$footers[ $count_footers++ ] = $statement;
+			$i++;
+		}
+
+		# print rules
+		$i = 0;
+		while ($rule_count && (@tmp = $LCL->{STH3}->fetchrow_array()))
+		{
+			if ($i == 0)
+			{
+				$statement = "Rules: $tmp[0]";
+			}
+			else
+			{
+				$statement = " " x 7 . $tmp[0];
+			}
+
+			if ($i < $rule_count - 1)
+			{
+				$statement .= ",";
+			}
+
+			$footers[ $count_footers++ ] = $statement;
+			$i++;
+		}
+
+		# print triggers
+		$i = 0;
+		while ($trigger_count && (@tmp = $LCL->{STH4}->fetchrow_array()))
+		{
+			if ($i == 0)
+			{
+				$statement = "Triggers: $tmp[0]";
+			}
+			else
+			{
+				$statement = " " x 10 . $tmp[0];
+			}
+
+			if ($i < $trigger_count - 1)
+			{
+				$statement .= ",";
+			}
+
+			$footers[ $count_footers++ ] = $statement;
+			$i++;
+		}
+
+	}
+
+	undef $LCL->{STH1};
+	undef $LCL->{STH2};
+	undef $LCL->{STH3};
+	undef $LCL->{STH4};
+	undef $LCL->{STH5};
+
+	$tmp = scalar @headers;
+	if ($retFields)
+	{
+		$i = 0;
+		return grep { $i++ % $tmp == 0 } @cells;
+	}
+
+	$LCL->{T}->setCols(\@headers);
+	$LCL->{T}->setTitle($title);
+
+	$rows = @cells / $tmp;
+	while (1)
+	{
+		$iteration = 0;
+		while (@tmp = splice(@cells, 0, $tmp))
+		{
+			$LCL->{T}->clearRows() if $iteration++ == 0;
+			$LCL->{T}->addRow(@tmp);
+
+			last if $iteration == $LCL->{CFG}->{PRINTROWS};
+		}
+
+		$LCL->{T}->drawT($LCL) if $iteration;
+
+		last if $iteration != $LCL->{CFG}->{PRINTROWS};
+	}
+	$LCL->{T}->drawEnd($LCL) if $rows;
+
+	$rows2 = @footers;
+	while (1)
+	{
+		$iteration = 0;
+		while (@tmp = splice(@footers, 0, $tmp))
+		{
+			$LCL->{T}->clearRows() if $iteration++ == 0;
+			$LCL->{T}->addRow(@tmp);
+
+			last if $iteration == $LCL->{CFG}->{PRINTROWS};
+		}
+
+		$LCL->{T}->drawT($LCL) if $iteration;
+
+		last if $iteration != $LCL->{CFG}->{PRINTROWS};
+	}
+	$LCL->{T}->drawEnd($LCL) if $rows2;
+
+	$LCL->rowInfo($rows + $rows2);
+
+	return 1;
+}
+
+###
+# \d{t|i|s|v|S} - list tables/indices/sequences/views/system tables
+# handler for \d, \dt, etc.
+# tabtypes is an array of characters, specifying what info is desired:
+# t - tables
+# i - indexes
+# v - views
+# s - sequences
+# S - system tables (pg_catalog)
+# (any order of the above is fine)
+sub pg_listTables
+{
+	my ($LCL, $tabtypes, $pattern, $verbose) = @_;
+
+	my $showTables  = index($tabtypes, 't') + 1;
+	my $showIndexes = index($tabtypes, 'i') + 1;
+	my $showViews   = index($tabtypes, 'v') + 1;
+	my $showSeq     = index($tabtypes, 's') + 1;
+	my $showSystem  = index($tabtypes, 'S') + 1;
+	unless ($showTables || $showIndexes || $showViews || $showSeq)
+	{
+		$showTables = $showViews = $showSeq = 1;
+	}
+
+	my $statement = '
+	SELECT	n.nspname as "Schema",
+		c.relname as "Name",
+	CASE	c.relkind
+	WHEN \'r\' THEN \'table\' WHEN \'v\' THEN \'view\' WHEN \'i\' THEN \'index\'
+	WHEN \'S\' THEN \'sequence\' WHEN \'s\' THEN \'special\' END as "Type",
+		u.usename as "Owner"
+  ';
+
+	if ($verbose)
+	{
+		$statement .= ',
+	pg_catalog.obj_description(c.oid, \'pg_class\') as "Description"
+    ';
+	}
+
+	if ($showIndexes)
+	{
+		$statement .= ',
+			c2.relname as "Table"
+	FROM		pg_catalog.pg_class c
+	JOIN		pg_catalog.pg_index i ON i.indexrelid = c.oid
+	JOIN		pg_catalog.pg_class c2 ON i.indrelid = c2.oid
+	LEFT JOIN	pg_catalog.pg_user u ON u.usesysid = c.relowner
+	LEFT JOIN	pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+    ';
+	}
+	else
+	{
+		$statement .= '
+	FROM		pg_catalog.pg_class c
+	LEFT JOIN	pg_catalog.pg_user u ON u.usesysid = c.relowner
+	LEFT JOIN	pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+    ';
+	}
+
+	$statement .= 'WHERE c.relkind IN (';
+	$statement .= "'r'," if $showTables;
+	$statement .= "'v'," if $showViews;
+	$statement .= "'i'," if $showIndexes;
+	$statement .= "'S'," if $showSeq;
+	$statement .= "'s'," if $showSystem && $showTables;
+	$statement .= "'')\n";
+
+	# If $showSystem is specified, show only system objects (those in
+	# pg_catalog).  Otherwise, suppress system objects, including
+	# those in pg_catalog and pg_toast.  (We don't want to hide temp
+	# tables though.)
+	if ($showSystem)
+	{
+		$statement .= " AND n.nspname = 'pg_catalog'\n";
+	}
+	else
+	{
+		$statement .= " AND n.nspname NOT IN ('pg_catalog', 'pg_toast')\n";
+	}
+
+	$statement =
+	  $LCL->processNamePattern($statement, $pattern, 1, 0, "n.nspname",
+		"c.relname", undef, "pg_catalog.pg_table_is_visible(c.oid)");
+
+	$statement .= "ORDER BY 1, 2;";
+
+	return $LCL->pg_query(
+		$statement,
+		"List of relations",
+		($pattern ? "No matching relations found." : "No relations found.")
+	);    #h4w
+}
+
+###
+# \l, \list - list databases
+sub pg_listAllDbs
+{
+	my ($LCL, $verbose) = @_;
+
+	my $statement = '
+	SELECT	d.datname AS "Name",
+		u.usename AS "Owner",
+		pg_catalog.pg_encoding_to_char(d.encoding) AS "Encoding"
+  ';
+
+	if ($verbose)
+	{
+		$statement .= ',
+	pg_catalog.obj_description(d.oid, \'pg_database\') AS "Description"
+    ';
+	}
+
+	$statement .= '
+	FROM		pg_catalog.pg_database d
+	LEFT JOIN	pg_catalog.pg_user u ON d.datdba = u.usesysid
+	ORDER BY 1;
+  ';
+
+	return $LCL->pg_query($statement, "List of databases");
+}
+
+###
+# \du - Describes users.  Any schema portion of the pattern is ignored.
+sub pg_describeUsers
+{
+	my ($LCL, $pattern) = @_;
+
+	my $statement = '
+	SELECT		u.usename AS "User name",
+			u.usesysid AS "User ID",
+	CASE WHEN	u.usesuper AND u.usecreatedb THEN CAST(\'superuser, create database\' AS pg_catalog.text)
+	WHEN		u.usesuper THEN CAST(\'superuser\' AS pg_catalog.text)
+	WHEN		u.usecreatedb THEN CAST(\'create database\' AS pg_catalog.text)
+	ELSE		CAST(\'\' AS pg_catalog.text)
+			END AS "Attributes"
+	FROM		pg_catalog.pg_user u
+  ';
+
+	$statement =
+	  $LCL->processNamePattern($statement, $pattern, 0, 0, undef, "u.usename",
+		undef, undef);
+
+	$statement .= 'ORDER BY 1;';
+
+	return $LCL->pg_query($statement, "List of database users");
+}
+
+###
+# \df - Lists functions.  Takes an optional regexp to select particular functions.
+sub pg_describeFunctions
+{
+	my ($LCL, $pattern, $verbose) = @_;
+
+	my $statement = "
+	SELECT CASE WHEN p.proretset THEN 'setof ' ELSE '' END ||
+	pg_catalog.format_type(p.prorettype, NULL) AS \"Result data type\",
+	n.nspname AS \"Schema\",
+	p.proname AS \"Name\",
+	pg_catalog.oidvectortypes(p.proargtypes) AS \"Argument data types\"
+  ";
+
+	if ($verbose)
+	{
+		$statement .= '
+	,
+	u.usename AS "Owner",
+	l.lanname AS "Language",
+	p.prosrc AS "Source code",
+	pg_catalog.obj_description(p.oid, \'pg_proc\') AS "Description"
+    ';
+	}
+
+	unless ($verbose)
+	{
+		$statement .= "
+	FROM		pg_catalog.pg_proc p
+	LEFT JOIN	pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+    ";
+	}
+	else
+	{
+		$statement .= "
+	FROM		pg_catalog.pg_proc p
+	LEFT JOIN	pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+	LEFT JOIN	pg_catalog.pg_language l ON l.oid = p.prolang
+	LEFT JOIN	pg_catalog.pg_user u ON u.usesysid = p.proowner
+    ";
+	}
+
+	# we skip in/out funcs by excluding functions that take or return cstring
+	$statement .= "
+	WHERE	p.prorettype <> 'pg_catalog.cstring'::pg_catalog.regtype
+	AND	p.proargtypes[0] <> 'pg_catalog.cstring'::pg_catalog.regtype
+	AND NOT	p.proisagg
+  ";
+
+	$statement =
+	  $LCL->processNamePattern($statement, $pattern, 1, 0, "n.nspname",
+		"p.proname", undef, "pg_catalog.pg_function_is_visible(p.oid)");
+
+	$statement .= "ORDER BY 2, 3, 1, 4;";
+
+	return $LCL->pg_query($statement, "List of functions");
+}
+
+###
+# Scan a wildcard-pattern option and generate appropriate WHERE clauses
+# to limit the set of objects returned.  The WHERE clauses are appended
+# to buf.
+# pattern: user-specified pattern option to a \d command, or NULL if none.
+# have_where: true if caller already emitted WHERE.
+# force_escape: always quote regexp special characters, even outside quotes.
+# schemavar: name of WHERE variable to match against a schema-name pattern.
+# Can be NULL if no schema.
+# namevar: name of WHERE variable to match against an object-name pattern.
+# altnamevar: NULL, or name of an alternate variable to match against name.
+# visibilityrule: clause to use if we want to restrict to visible objects
+# (for example, "pg_catalog.pg_table_is_visible(p.oid)"). Can be NULL.
+sub processNamePattern
+{
+	my (
+		$LCL,        $statement,    $pattern,
+		$have_where, $force_escape, $schemavar,
+		$namevar,    $altnamevar,   $visibilityrule
+	) = @_;
+
+	if ($pattern eq '')
+	{
+
+		# Default: select all visible objects
+		if ($visibilityrule)
+		{
+			$statement .= $have_where++ ? " AND " : " WHERE ";
+			$statement .= "$visibilityrule\n";
+		}
+		return $statement;
+	}
+
+	# Parse the pattern, converting quotes and lower-casing unquoted
+	# letters; we assume this was NOT done by scan_option.  Also, adjust
+	# shell-style wildcard characters into regexp notation.
+	my $namebuf   = "";
+	my $schemabuf = "";
+	my $inquotes  = 0;
+	my $cp        = 0;
+	my @cp        = split //, $pattern;
+
+	while ($cp[$cp])
+	{
+		if ($cp[$cp] eq '"')
+		{
+			if ($inquotes && $cp[ $cp + 1 ] eq '"')
+			{
+
+				# emit one quote
+				$namebuf .= '"';
+				$cp++;
+			}
+			$inquotes = !$inquotes;
+			$cp++;
+		}
+		elsif (!$inquotes && $cp[$cp] =~ /^[A-Z]/)
+		{
+			$namebuf .= lc($cp[ $cp++ ]);
+		}
+		elsif (!$inquotes && $cp[$cp] eq '*')
+		{
+			$namebuf .= ".*";
+			$cp++;
+		}
+		elsif (!$inquotes && $cp[$cp] eq '?')
+		{
+			$namebuf .= ".";
+			$cp++;
+		}
+		elsif (!$inquotes && $cp[$cp] eq '.')
+		{
+
+			# Found schema/name separator, move current pattern to schema
+			$schemabuf = $namebuf;
+			$namebuf   = '';
+			$cp++;
+		}
+		else
+		{
+
+			# Ordinary data character, transfer to pattern
+			# Inside double quotes, or at all times if parsing an operator
+			# name, quote regexp special characters with a backslash to
+			# avoid regexp errors.  Outside quotes, however, let them
+			# pass through as-is; this lets knowledgeable users build
+			# regexp expressions that are more powerful than shell-style
+			# patterns.
+			if (($inquotes || $force_escape)
+				&& $cp[$cp] =~ m/^[\|\*\+\?\(\)\[\]\{\}\.\^\$\\]$/)
+			{
+				$namebuf .= "\\\\";
+			}
+
+			$namebuf .= $cp[ $cp++ ];
+		}
+	}
+
+	# Now decide what we need to emit.
+	if (length($schemabuf))
+	{
+
+		# We have a schema pattern, so constrain the schemavar
+		$schemabuf .= '$';
+
+		# Optimize away ".*$", and possibly the whole pattern
+		if (substr($schemabuf, -3, 3) eq '.*$')
+		{
+			substr($schemabuf, -3, 3, "");
+		}
+
+		if (length($schemabuf) && length($schemavar))
+		{
+			$statement .= $have_where++ ? " AND " : " WHERE ";
+			$statement .= "$schemavar ~ '^$schemabuf'\n";
+		}
+	}
+	else
+	{
+
+		# No schema pattern given, so select only visible objects
+		if ($visibilityrule)
+		{
+			$statement .= $have_where++ ? " AND " : " WHERE ";
+			$statement .= "$visibilityrule\n";
+		}
+	}
+
+	if (length($namebuf))
+	{
+
+		# We have a name pattern, so constrain the namevar(s)
+
+		$namebuf .= '$';
+
+		# Optimize away ".*$", and possibly the whole pattern
+		if (substr($schemabuf, -3, 3) eq '.*$')
+		{
+			substr($schemabuf, -3, 3, "");
+		}
+
+		if (length($namebuf))
+		{
+			$statement .= $have_where++ ? " AND " : " WHERE ";
+			if ($altnamevar)
+			{
+				$statement .=
+				  "($namevar ~ '^$namebuf'\nOR $altnamevar ~ '^$namebuf')\n";
+			}
+			else
+			{
+				$statement .= "$namevar ~ '^$namebuf'\n";
+			}
+		}
+	}
+
+	return $statement;
+}
+
+###
+# just a simpler query function for PostgreSQL
+sub pg_query
+{
+	my ($LCL, $statement, $title) = @_;
+	my ($rows, $tmp);
+
+	eval {
+		$LCL->{STH} =
+		      $LCL->{DBH}->[ $LCL->{PARSE}->{DBNUMBER} ]->prepare($statement)
+		  and $rows = $LCL->{STH}->execute();
+	};
+
+	# was the query successful or not
+	if ($rows && !$@)
+	{
+
+		$rows = sprintf "%d", $rows;
+
+		$LCL->{T}->setCols($LCL->{STH}->{NAME});
+		$LCL->{T}->setTitle($title);
+
+		my $iteration;
+		my $nrows = 0;
+		eval {
+			while (1)
+			{
+
+				$iteration = 0;
+				while ($tmp = $LCL->{STH}->fetchrow_arrayref())
+				{
+					$nrows++;
+					$LCL->{T}->clearRows() if $iteration++ == 0;
+					$LCL->{T}->addRow(@{$tmp});
+
+					last if $iteration == $LCL->{CFG}->{PRINTROWS};
+				}
+
+				$LCL->{T}->drawT($LCL) if $iteration;
+
+				last if $iteration != $LCL->{CFG}->{PRINTROWS};
+			}
+		};
+
+		$LCL->{T}->drawEnd($LCL) if $nrows;
+
+		$rows = $nrows if $rows < 1;
+		$LCL->rowInfo($rows);
+	}
+	else { return $LCL->error($@) }
+
+	undef $LCL->{STH};
+	return 1;
+}
+
+########################################################
+#
+# other crap
+#
+###
+# create a random word
+sub randWord
+{
+	my ($LCL, $num) = @_;
+
+	my @letters = ('a' .. 'z', 'A' .. 'Z', 0 .. 9, '.');
+	my $word;
+	foreach (0 .. $num || int(rand(20)) + 10)
+	{
+		$word .= $letters[ int(rand(@letters)) ];
+	}
+
+	return $word;
+}
+
+###
+# returns the list of tables in a specific database
+sub getTables
+{
+	my ($LCL, $dbNumber) = @_;
+
+	eval {
+
+		if (   $LCL->{DB}->[$dbNumber]->{t} eq 'mysql'
+			|| $LCL->{DB}->[$dbNumber]->{t} eq 'mysqlPP')
+		{
+			return
+			  @{ $LCL->{DBH}->[$dbNumber]->selectcol_arrayref("SHOW TABLES") };
+		}
+
+		elsif ($LCL->{DB}->[$dbNumber]->{t} eq 'Oracle')
+		{
+
+			#      return @{$LCL->{DBH}->[$dbNumber]->selectcol_arrayref("SELECT * FROM tab")};
+			return
+			  @{ $LCL->{DBH}->[$dbNumber]
+				  ->selectcol_arrayref("SELECT tname FROM tab") };
+		}
+
+		elsif ($LCL->{DB}->[$dbNumber]->{t} eq 'DB2')
+		{
+			my $ucinstname = uc $ENV{'DB2INSTANCE'};
+			return @{
+				$LCL->{DBH}->[$dbNumber]->selectcol_arrayref(
+					"SELECT tabname FROM syscat.tables WHERE tabschema = '$ucinstname'"
+				)
+			  };
+		}
+
+		elsif ($LCL->{DB}->[$dbNumber]->{t} eq 'SQLite')
+		{
+			return
+			  @{ $LCL->{DBH}->[$dbNumber]
+				  ->selectcol_arrayref("SELECT name FROM sqlite_master") };
+		}
+
+		elsif ($LCL->{DB}->[$dbNumber]->{t} eq 'Sybase')
+		{
+			return @{
+				$LCL->{DBH}->[$dbNumber]->selectcol_arrayref(
+					"SELECT name FROM dbo.sysobjects WHERE type = 'U'")
+			  };
+		}
+
+		elsif ($LCL->{DB}->[$dbNumber]->{t} eq 'Excel')
+		{
+			return $LCL->{DBH}->[$dbNumber]->func('list_tables');
+		}
+
+		elsif ($LCL->{DB}->[$dbNumber]->{t} eq 'Pg'
+			|| $LCL->{DB}->[$dbNumber]->{t} eq 'PgPP')
+		{
+			return @{
+				$LCL->{DBH}->[$dbNumber]->selectcol_arrayref("
+	SELECT		c.relname
+	FROM		pg_catalog.pg_class c
+	LEFT JOIN	pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+	WHERE		c.relkind = 'r'
+	AND		n.nspname NOT IN ('pg_catalog', 'pg_toast')
+	AND		pg_catalog.pg_table_is_visible(c.oid)
+	ORDER BY 1
+      ")
+			  };
+		}
+
+		else
+		{
+			return
+			  @{ $LCL->{DBH}->[$dbNumber]->selectcol_arrayref("SHOW TABLES") };
+		}
+	};
+}
+
+###
+# returns the fields in a table
+sub getFields
+{
+	my ($LCL, $dbNumber, $table) = @_;
+
+	eval {
+
+		if (   $LCL->{DB}->[$dbNumber]->{t} eq 'mysql'
+			|| $LCL->{DB}->[$dbNumber]->{t} eq 'mysqlPP')
+		{
+			return
+			  map { "$table.$_" }
+			  @{ $LCL->{DBH}->[$dbNumber]->selectcol_arrayref("DESC $table") };
+		}
+
+		elsif ($LCL->{DB}->[$dbNumber]->{t} eq 'Oracle')
+		{
+
+			#      return map { "$table.$_" } @{$LCL->{DBH}->[$dbNumber]->selectcol_arrayref("SELECT column_name FROM all_tab_columns WHERE table_name='$table'")};
+			return map { "$table.$_" } @{
+				$LCL->{DBH}->[$dbNumber]->selectcol_arrayref("
+	SELECT  column_name
+	FROM    all_tab_columns
+	WHERE   table_name='$table'
+	AND     owner = '" . uc($LCL->{DB}->[$dbNumber]->{u}) . "'
+      ")
+			  };
+		}
+
+		elsif ($LCL->{DB}->[$dbNumber]->{t} eq 'SQLite')
+		{
+			my ($row) = @{
+				$LCL->{DBH}->[$dbNumber]->selectcol_arrayref("
+	SELECT	sql
+	FROM	sqlite_master
+	WHERE	tbl_name = '$table'
+      ")
+			  };
+
+			$row =~ s/^.*?\(//;
+			$row =~ s/\)\s*$//;
+			my @cols;
+			$row = ",$row";
+			while ($row =~ s/,\s*([^\s,]+)//)
+			{
+				push @cols, $1;
+			}
+
+			return @cols;
+		}
+
+		elsif ($LCL->{DB}->[$dbNumber]->{t} eq 'DB2')
+		{
+			my $ucinstname = uc $ENV{'DB2INSTANCE'};
+			return map { "$table.$_" } @{
+				$LCL->{DBH}->[$dbNumber]->selectcol_arrayref("
+	SELECT	colname
+	FROM	syscat.columns
+	WHERE	tabschema	= '$ucinstname'
+	AND	tabname		= '$table'
+      ")
+			  };
+		}
+
+		elsif ($LCL->{DB}->[$dbNumber]->{t} eq 'Sybase')
+		{
+			return map { "$table.$_" } @{
+				$LCL->{DBH}->[$dbNumber]->selectcol_arrayref("
+	SELECT	a.name
+	FROM	syscolumns a, sysobjects b
+	WHERE	a.id		= b.id
+	AND	b.name		= '$table'
+      ")
+			  };
+		}
+
+		elsif ($LCL->{DB}->[$dbNumber]->{t} eq 'Excel')
+		{
+			return
+			  map { "$table.$_" }
+			  @{ $LCL->{DBH}->[$dbNumber]->selectcol_arrayref("DESC $table") };
+		}
+
+		elsif ($LCL->{DB}->[$dbNumber]->{t} eq 'Pg'
+			|| $LCL->{DB}->[$dbNumber]->{t} eq 'PgPP')
+		{
+			my $rows;
+
+			# Get general table info
+			my $statement = "
+	SELECT		c.oid, n.nspname, c.relname
+	FROM		pg_catalog.pg_class c
+	LEFT JOIN	pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+	WHERE		c.relname = '$table'
+      ";
+
+			eval {
+				$LCL->{STH} = $LCL->{DBH}->[$dbNumber]->prepare($statement)
+				  and $rows = $LCL->{STH}->execute();
+			};
+			unless ($rows > 0)
+			{
+				$LCL->error("Did not find any relation named \"$table\".");
+				return ();
+			}
+
+			my @tmp = $LCL->{STH}->fetchrow_array();
+			return
+			  map { "$table.$_" }
+			  $LCL->pg_describeOneTableDetails($tmp[1], $tmp[2], $tmp[0], 0, 1);
+		}
+
+		else
+		{
+			return ();
+		}
+	};
+}
+
+###
+# accepts a line to be printed at cmd line and converts
+# any variables to the current db connection's data
+sub psEval
+{
+	my ($LCL, $text) = @_;
+	$text = Term::ANSIColor::colored($text, 'bold green');
+
+	return $text;
+}
+
+###
+# row info
+sub rowInfo
+{
+	my ($LCL, $rows) = @_;
+	$LCL->prnt(
+		(
+			$LCL->{STH} && $LCL->{STH}->{NUM_OF_FIELDS}
+			? "$rows row" . ($rows == 1 ? "" : "s") . " in set "
+			: "Query OK, $rows row" . ($rows == 1 ? "" : "s") . " affected "
+		)
+		. $LCL->timer() . "\n\n",
+		undef,
+		"bold cyan"
+	);
+}
+
+###
+# check to see if query should end
+sub checkStop
+{
+	my ($LCL) = @_;
+	if ($LCL->{STOP})
+	{
+		$LCL->prnt("Query prematurely ended\n");
+		$LCL->{STOP} = 0;
+		return 1;
+	}
+
+	return 0;
+}
+
+###
+# very elite gettimeofday() function using syscall()
+# you may think it's not portable but the syscall value
+# is grabbed on first run of sql++ by reading in your
+# include files and stored in the config for later use :)
+sub gettimeofday
+{
+	my ($LCL, $time) = @_;
+	return 0 if $LCL->{CFG}->{SYS_gettimeofday} == 0;
+
+	my $ctime = pack("L2", 0, 0);
+
+	syscall($LCL->{CFG}->{SYS_gettimeofday}, $ctime, undef);
+
+	if ($time)
+	{
+		my ($gsec,  $gusec)  = unpack("L2", $time);
+		my ($gcsec, $gcusec) = unpack("L2", $ctime);
+
+		return sprintf("$gcsec.%06d", $gcusec) - sprintf("$gsec.%06d", $gusec);
+	}
+
+	return $ctime;
+}
+
+###
+# start and end timer
+sub timer
+{
+	my ($LCL, $place) = @_;
+
+	if ($place)
+	{
+		$LCL->{TIMER} = $LCL->gettimeofday();
+		return 1;
+	}
+
+	my $sec = $LCL->gettimeofday($LCL->{TIMER});
+	my ($day, $hour, $min, $dec);
+
+	$sec =~ s/(\....).*$/$1/;
+	$sec =~ s/\.(.*)$//;
+	$dec = $1;
+
+	$day = int($sec / 86400);
+	$sec %= 86400;
+	$hour = int($sec / 3600);
+	$sec %= 3600;
+	$min = int($sec / 60);
+	$sec %= 60;
+
+	return (
+		    "("
+		  . ($day ? "$day day" . ($day == 1 ? "" : "s") . ", " : "")
+		  . ($day || $hour ? "$hour hour" . ($hour == 1 ? "" : "s") . ", " : "")
+		  . (
+			     $day
+			  || $hour
+			  || $min ? "$min min" . ($min == 1 ? "" : "s") . ", " : ""
+		  )
+		  . "$sec.$dec secs)"
+	);
+}
+
+###
+# reads in C header files looking for the value
+# of a definition, used on first run to find
+# SYS_gettimeofday for the gettimeofday function
+sub include
+{
+	my ($file, $define) = @_;
+
+	return $define if $define =~ /^\d+$/;
+
+	open(INC, "</usr/include/$file");
+	my $include = join "", <INC>;
+	close(INC);
+
+	$include =~ s:/\*.*?\*/: :gs;
+	$include =~ s/\/\/[^\n]+//gs;
+	$include =~ s/\\ ?\n//gs;
+
+	foreach (split(/\n+/, $include))
+	{
+		if (/^\s*#\s*define\s+$define\s+(\S+)/)
+		{
+			$define = $1;
+			return $define if $define =~ /^\d+$/;
+		}
+		elsif (/^\s*#\s*include\s+<([^>]+)>/)
+		{
+			$define = &include($1, $define);
+			return $define if $define =~ /^\d+$/;
+		}
+	}
+
+	return $define;
+}
+
+###
+# spooling on
+sub spoolOn
+{
+	my ($LCL) = @_;
+
+	$LCL->spoolOff();
+
+	if (open(SPOOL, ">>$LCL->{SPOOLFILE}"))
+	{
+		$LCL->{SPOOL}   = 1;
+		$LCL->{SPOOLFH} = \*SPOOL;
+	}
+	else
+	{
+		$LCL->error("cannot append to spool file: $!");
+	}
+}
+
+###
+# spooling off
+sub spoolOff
+{
+	my ($LCL) = @_;
+
+	if ($LCL->{SPOOL})
+	{
+		$LCL->{SPOOL} = 0;
+		return close($LCL->{SPOOLFH});
+	}
+
+	return undef;
+}
+
+###
+# 'show tables' for Excel/Oracle/Sybase/DB2/mysql/PostgreSQL
+sub implShow
+{
+	my ($LCL) = @_;
+	my @rows;
+
+	eval { @rows = $LCL->getTables($LCL->{PARSE}->{DBNUMBER}); };
+
+	if (@rows && !$@)
+	{
+		$LCL->{T}->setCols(
+			["Tables_in_$LCL->{DB}->[$LCL->{PARSE}->{DBNUMBER}]->{db}"]);
+		$LCL->{T}->addRow($_) foreach @rows;
+		$LCL->{T}->draw($LCL);
+		$LCL->{T}->drawEnd($LCL);
+		$LCL->rowInfo(scalar @rows);
+	}
+	elsif ($@) { return $LCL->error($@ || $LCL->{PARSE}->{DBNUMBER}) }
+
+	return 1;
+}
+
+###
+# `desc` function for Oracle
+sub oracleDesc
+{
+	my ($LCL) = @_;
+	my ($rows, $tmp);
+
+	# get rid of any database name
+	$LCL->{PARSE}->{FUNCTIONS}->[1] =~ s/^[^\.]+\.//;
+
+	eval {
+		$LCL->{STH} =
+		  $LCL->{DBH}->[ $LCL->{PARSE}->{DBNUMBER} ]->prepare("
+	SELECT	column_name, nullable, data_type, data_length
+	FROM	all_tab_columns
+	WHERE	table_name	= '" . uc($LCL->{PARSE}->{FUNCTIONS}->[1]) . "'
+	AND	owner		= '" . uc($LCL->{DB}->[ $LCL->{PARSE}->{DBNUMBER} ]->{u}) . "'
+    ")
+		  and $rows = $LCL->{STH}->execute();
+	};
+
+	# was the query successful or not
+	if ($rows && !$@)
+	{
+
+		$rows = sprintf "%d", $rows;
+
+		$LCL->{T}->setCols([ "Name", "Null?", "Type" ]);
+
+		my $iteration;
+		my $nrows = 0;
+		eval {
+			while (1)
+			{
+
+				$iteration = 0;
+				while ($tmp = $LCL->{STH}->fetchrow_arrayref())
+				{
+					$nrows++;
+					$LCL->{T}->clearRows() if $iteration++ == 0;
+					$LCL->{T}
+					  ->addRow($tmp->[0], ($tmp->[1] eq 'N' ? 'NOT NULL' : ''),
+						"$tmp->[2]($tmp->[3])");
+
+					last if $iteration == $LCL->{CFG}->{PRINTROWS};
+				}
+
+				$LCL->{T}->draw($LCL) if $iteration;
+
+				last if $iteration != $LCL->{CFG}->{PRINTROWS};
+			}
+		};
+
+		$LCL->{T}->drawEnd($LCL) if $nrows;
+
+		$rows ||= $nrows;
+		$rows
+		  ? $LCL->rowInfo($rows)
+		  : $LCL->error(
+			"object $LCL->{PARSE}->{FUNCTIONS}->[1] does not exist");
+	}
+	else { return $LCL->error($@) }
+
+	undef $LCL->{STH};
+	return 1;
+}
+
+###
+# `desc` function for IBM DB2
+sub ibmdb2Desc
+{
+	my ($LCL) = @_;
+	my ($rows, $tmp);
+
+	# get rid of any database name
+	$LCL->{PARSE}->{FUNCTIONS}->[1] =~ s/^[^\.]+\.//;
+
+	my $ucinstname = uc $ENV{'DB2INSTANCE'};
+	eval {
+		$LCL->{STH} =
+		  $LCL->{DBH}->[ $LCL->{PARSE}->{DBNUMBER} ]->prepare("
+	SELECT	colname, typename, length, default, nulls, identity
+	FROM	syscat.columns
+	WHERE	tabschema = '$ucinstname'
+	AND	tabname = '" . uc($LCL->{PARSE}->{FUNCTIONS}->[1]) . "'
+    ")
+		  and $rows = $LCL->{STH}->execute();
+	};
+
+	# was the query successful or not
+	if ($rows && !$@)
+	{
+
+		$rows = sprintf "%d", $rows;
+
+		$LCL->{T}->setCols([ "Name", "Null?", "Type", "Default", "Identify" ]);
+
+		my $iteration;
+		my $nrows = 0;
+		eval {
+			while (1)
+			{
+
+				$iteration = 0;
+				while ($tmp = $LCL->{STH}->fetchrow_arrayref())
+				{
+					$nrows++;
+					$LCL->{T}->clearRows() if $iteration++ == 0;
+					$LCL->{T}->addRow(
+						$tmp->[0],
+						$tmp->[4],
+
+						#		($tmp->[4] eq 'N' ? 'NOT NULL' : ''),
+						"$tmp->[1]($tmp->[2])",
+						$tmp->[3],
+						$tmp->[5],
+					);
+
+					last if $iteration == $LCL->{CFG}->{PRINTROWS};
+				}
+
+				$LCL->{T}->draw($LCL) if $iteration;
+
+				last if $iteration != $LCL->{CFG}->{PRINTROWS};
+			}
+		};
+
+		$LCL->{T}->drawEnd($LCL) if $nrows;
+
+		$rows = $nrows unless $rows > 0;
+		$rows
+		  ? $LCL->rowInfo($rows)
+		  : $LCL->error(
+			"object $LCL->{PARSE}->{FUNCTIONS}->[1] does not exist");
+	}
+	else { return $LCL->error($@) }
+
+	undef $LCL->{STH};
+	return 1;
+}
+
+###
+# `desc` function for Sybase
+sub sybaseDesc
+{
+	my ($LCL) = @_;
+	my ($rows, $tmp);
+
+	# get rid of any database name
+	$LCL->{PARSE}->{FUNCTIONS}->[1] =~ s/^[^\.]+\.//;
+
+	eval {
+		$LCL->{STH} =
+		  $LCL->{DBH}->[ $LCL->{PARSE}->{DBNUMBER} ]->prepare("
+	SELECT	a.name, c.name, a.length, a.status
+	FROM	syscolumns a, sysobjects b, systypes c
+	WHERE	a.id		= b.id
+	AND	a.usertype	= c.usertype
+	AND	b.name		= '" . $LCL->{PARSE}->{FUNCTIONS}->[1] . "'
+    ")
+		  and $rows = $LCL->{STH}->execute();
+	};
+
+	# was the query successful or not
+	if ($rows && !$@)
+	{
+
+		$rows = sprintf "%d", $rows;
+
+		$LCL->{T}->setCols([ "Name", "Null?", "Type" ]);
+
+		my $iteration;
+		my $nrows = 0;
+		eval {
+			while (1)
+			{
+
+				$iteration = 0;
+				while ($tmp = $LCL->{STH}->fetchrow_arrayref())
+				{
+					$nrows++;
+					$LCL->{T}->clearRows() if $iteration++ == 0;
+					$LCL->{T}->addRow($tmp->[0], ($tmp->[3] ? 'YES' : ''),
+						"$tmp->[1]($tmp->[2])",);
+
+					last if $iteration == $LCL->{CFG}->{PRINTROWS};
+				}
+
+				$LCL->{T}->draw($LCL) if $iteration;
+
+				last if $iteration != $LCL->{CFG}->{PRINTROWS};
+			}
+		};
+
+		$LCL->{T}->drawEnd($LCL) if $nrows;
+
+		$rows ||= $nrows;
+		$rows
+		  ? $LCL->rowInfo($rows)
+		  : $LCL->error(
+			"object $LCL->{PARSE}->{FUNCTIONS}->[1] does not exist");
+	}
+	else { return $LCL->error($@) }
+
+	undef $LCL->{STH};
+	return 1;
+}
+
+########################################################
+#
+# these functions are based off of Text::ASCIITable
+# by Håkon Nessjøen <lunatic@skonux.net>
+# but are modified or I've added new functions for sql++
+#
+###
+package sqlpp::ASCIITable;
+
+sub new
+{
+	my $self = { tbl_cols => [], tbl_rows => [], tbl_alignright => [] };
+	bless $self;
+
+	shift;
+	my %opt = @_;
+	$self->{flatten_line} = exists($opt{flatten_line}) ? $opt{flatten_line} : 0;
+	$self->{no_wrap}      = exists($opt{no_wrap})      ? $opt{no_wrap}      : 0;
+
+	return $self;
+}
+
+sub setCols
+{
+	my $self = shift;
+	$self->{tbl_cols}  = shift;
+	$self->{tbl_title} = undef;
+	$self->clearRows() unless shift == 1;
+
+	return undef;
+}
+
+sub setTitle
+{
+	my $self = shift;
+	$self->{first}     = 0;
+	$self->{tbl_title} = shift;
+	return undef;
+}
+
+sub addRow
+{
+	my $self = shift;
+	push @{ $self->{tbl_rows} }, [@_];
+	return undef;
+}
+
+sub clearRows
+{
+	return @{ $_[0]->{tbl_rows} } = ();
+}
+
+sub getColWidth
+{
+	my ($self, $colname) = @_;
+	my $pos = $self->finn($colname, $self->{tbl_cols});
+	my $maxsize = length($colname);
+
+	foreach (@{ $self->{tbl_rows} })
+	{
+		$maxsize = length(@{$_}[$pos]) if (length(@{$_}[$pos]) > $maxsize);
+	}
+
+	return $maxsize + 2;
+}
+
+sub getTableWidth
+{
+	my $self      = shift;
+	my $totalsize = 1;
+
+	foreach (@{ $self->{tbl_cols} })
+	{
+		$totalsize += $self->getColWidth($_) + 1;
+	}
+
+	return $totalsize;
+}
+
+sub drawLine
+{
+	my ($self, $start, $stop, $line, $delim) = @_;
+
+	$line  = defined($line)  ? $line  : '-';
+	$delim = defined($delim) ? $delim : '+';
+
+	my $contents = $start;
+
+	for (my $i = 0 ; $i < scalar(@{ $self->{tbl_cols} }) ; $i++)
+	{
+		my $offset = 0;
+		$offset = length($start) - 1 if $i == 0;
+		$offset = length($stop) - 1  if $i == $#{ $self->{tbl_cols} };
+
+		$contents .=
+		  $line x ($self->getColWidth(@{ $self->{tbl_cols} }[$i]) - $offset);
+		$contents .= $delim if $i != $#{ $self->{tbl_cols} };
+	}
+	$contents .= "$stop\n";
+
+	if ($self->{flatten_line} && length($contents) > $self->{TERM_WIDTH})
+	{
+		substr($contents, $self->{TERM_WIDTH} - 2) = "$stop\n";
+	}
+
+	return Term::ANSIColor::colored($contents, 'bold');
+}
+
+sub drawRow
+{
+	my ($self, $row, $allowalign, $start, $stop, $delim, $tcolor) = @_;
+
+	$allowalign = defined($allowalign) ? $allowalign : 1;
+	$delim      = defined($delim)      ? $delim      : '|';
+
+	my ($cstart, $cstop, $cdelim) =
+	  map { Term::ANSIColor::colored($_, "bold") } ($start, $stop, $delim);
+	my $contents = $cstart;
+	my $pseudo   = $start;
+
+	my $wrap  = $self->getTableWidth() > $self->{TERM_WIDTH};
+	my $color = $tcolor;
+	for my $i (0 .. $#{$row})
+	{
+		my $text   = $row->[$i];
+		my $spaces = ' ' x
+		  ($self->getColWidth(@{ $self->{tbl_cols} }[$i]) - length($text) - 1);
+		if ($wrap)
+		{
+			$color = $i == $#$row ? 'yellow' : $i ? $tcolor : 'bold yellow';
+		}
+
+		if (
+			   $allowalign == 1
+			&& scalar(@{ $self->{tbl_alignright} })
+			&& defined(
+				$self->finn(
+					@{ $self->{tbl_cols} }[$i], $self->{tbl_alignright}
+				)
+			)
+		  )
+		{
+			if ($self->{no_wrap}
+				&& length($pseudo) + length($spaces) + length($text) + 1 >
+				$self->{TERM_WIDTH})
+			{
+				$contents .= "\n";
+				$pseudo = '';
+			}
+			$contents .=
+			  $spaces . Term::ANSIColor::colored($text, $color) . ' ';
+			$pseudo .= $spaces . $text . ' ';
+		}
+		else
+		{
+			if ($self->{no_wrap}
+				&& length($pseudo) + length($spaces) + length($text) + 1 >
+				$self->{TERM_WIDTH})
+			{
+				$contents .= "\n";
+				$pseudo = '';
+			}
+			$contents .=
+			  ' ' . Term::ANSIColor::colored($text, $color) . $spaces;
+			$pseudo .= ' ' . $text . $spaces;
+		}
+		$contents .= $cdelim if $i != $#{$row};
+		$pseudo   .= $delim  if $i != $#{$row};
+	}
+
+	return "$contents$cstop\n";
+}
+
+sub drawTitle
+{
+	my ($self, $row, $allowalign, $start, $stop) = @_;
+	$allowalign = defined($allowalign) ? $allowalign : 1;
+
+	my ($cstart, $cstop) =
+	  map { Term::ANSIColor::colored($_, "bold") } ($start, $stop);
+	$self->{TABLE_WIDTH} = $self->getTableWidth();
+
+	my $contents = $cstart;
+	my $tmp = join "", @{ $self->{tbl_cols} };
+
+	if (   $allowalign == 1
+		&& scalar(@{ $self->{tbl_alignright} })
+		&& defined($self->finn($tmp, $self->{tbl_alignright})))
+	{
+		$contents .=
+		  ' ' x ($self->{TABLE_WIDTH} - length($self->{tbl_title}) - 3);
+		$contents .= $self->{tbl_title} . ' ';
+	}
+	else
+	{
+		$contents .= ' ' . $self->{tbl_title};
+		$contents .=
+		  ' ' x ($self->{TABLE_WIDTH} - length($self->{tbl_title}) - 3);
+	}
+
+	return "$contents$cstop\n";
+}
+
+sub draw
+{
+	my ($self, $LCL) = @_;
+
+	$self->{TERM_WIDTH} = $LCL->{TERM}->{WIDTH};
+
+	return $LCL->prnt(
+		join "",
+		$self->drawLine(@{ $LCL->{CFG}->{LINE1} }),
+		$self->drawRow(
+			$self->{tbl_cols}, 0, @{ $LCL->{CFG}->{DATA1} },
+			"bold magenta"
+		),
+		$self->drawLine(@{ $LCL->{CFG}->{LINE2} }),
+		map { $self->drawRow($_, 1, @{ $LCL->{CFG}->{DATA2} }) }
+		  @{ $self->{tbl_rows} }
+	);
+}
+
+sub drawT
+{
+	my ($self, $LCL) = @_;
+
+	$self->{TERM_WIDTH} = $LCL->{TERM}->{WIDTH};
+
+	return $LCL->prnt(
+		join "",
+		(
+			$self->{first}++
+			? ()
+			: (
+				$self->drawLine(@{ $LCL->{CFG}->{LINE1} }[ 0, 1, 2, 2 ]),
+				$self->drawTitle(
+					$self->{tbl_title}, 0, @{ $LCL->{CFG}->{DATA1} }
+				)
+			)
+		),
+		$self->drawLine(@{ $LCL->{CFG}->{LINE1} }),
+		$self->drawRow($self->{tbl_cols}, 0, @{ $LCL->{CFG}->{DATA1} }),
+		$self->drawLine(@{ $LCL->{CFG}->{LINE2} }),
+		map { $self->drawRow($_, 1, @{ $LCL->{CFG}->{DATA2} }) }
+		  @{ $self->{tbl_rows} }
+	);
+}
+
+sub drawEnd
+{
+	my ($self, $LCL) = @_;
+	return $LCL->prnt($self->drawLine(@{ $LCL->{CFG}->{LINE3} }));
+}
+
+sub finn
+{
+	my $self = shift;
+	grep { return $_ if $_[1]->[$_] eq $_[0] } 0 .. $#{ $_[1] };
+	return undef;
+}
+
+# EOF
