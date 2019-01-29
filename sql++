@@ -4558,6 +4558,9 @@ sub getFields
 sub psEval
 {
 	my ($LCL, $text) = @_;
+	return $text;
+
+  # TODO: some terminals break on line wrapping with ansi color as the prompt
 	$text = Term::ANSIColor::colored($text, 'bold green');
 
 	return $text;
